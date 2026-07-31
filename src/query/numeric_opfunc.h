@@ -183,4 +183,28 @@ extern void float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_b
 extern bool numeric_db_value_is_zero (const DB_VALUE * arg);
 
 extern int numeric_db_value_is_positive (const DB_VALUE * arg);
+
+/*
+ * NUMERIC_SUM_ACC: word-based accumulator for aggregate SUM/AVG (POC).
+ *
+ * Accumulates NUMERIC values as raw words and defers digit counting,
+ * overflow checking, rounding and DB_VALUE packing to a single finalize
+ * call, instead of performing them for every accumulated row.
+ *
+ * Invariant: rounding happens exactly once per group, at finalize.
+ */
+#define NUMERIC_SUM_ACC_WORDS  (14)	/* covers TWICE_NUM_MAX_PREC (256) decimal digits */
+
+typedef struct numeric_sum_acc NUMERIC_SUM_ACC;
+struct numeric_sum_acc
+{
+  uint64_t words[NUMERIC_SUM_ACC_WORDS];	/* big-endian word order; [NUMERIC_SUM_ACC_WORDS - 1] is the LSW */
+  int used_words;		/* number of active low words */
+  int scale;			/* scale of the accumulated value */
+  bool is_negative;
+  bool is_active;		/* false until the first value is accumulated */
+};
+
+extern int numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
+extern int numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 #endif /* _NUMERIC_OPFUNC_H_ */

@@ -4051,6 +4051,198 @@ float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_buf, int prec
 }
 
 /*
+ * numeric_sum_acc_words_add () - add two word windows with a hardware carry chain
+ *
+ * Note: same-index read-then-write, so result may alias either input.
+ */
+static inline void
+numeric_sum_acc_words_add (const uint64_t * a, const uint64_t * b, uint64_t * r, int n)
+{
+  unsigned char c = 0;
+  int d;
+
+  for (d = n - 1; d >= 0; d--)
+    {
+      c = _addcarry_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
+    }
+}
+
+/*
+ * numeric_sum_acc_words_sub () - subtract two word windows with a hardware borrow chain
+ *
+ * Note: precondition |a| >= |b| within the window; result may alias either input.
+ */
+static inline void
+numeric_sum_acc_words_sub (const uint64_t * a, const uint64_t * b, uint64_t * r, int n)
+{
+  unsigned char c = 0;
+  int d;
+
+  for (d = n - 1; d >= 0; d--)
+    {
+      c = _subborrow_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
+    }
+}
+
+/*
+ * numeric_sum_acc_add_value () - accumulate a NUMERIC value into a word-based SUM/AVG accumulator
+ *   return: NO_ERROR
+ *   acc(in/out) : word accumulator; activated by the first accumulated value
+ *   dbv(in)     : NUMERIC value to accumulate
+ *
+ * Note:
+ *   - Performs only conversion, scale alignment and signed word addition per value.
+ *     Digit counting, overflow checking, rounding and packing are deferred to
+ *     numeric_sum_acc_finalize (), so rounding happens exactly once per group.
+ *   - Operates on the active word window only (used_words + 1 carry word).
+ */
+int
+numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
+{
+  uint64_t val_words[NUMERIC_SUM_ACC_WORDS] = { 0 };
+  int val_prec, val_scale, val_used;
+  bool val_neg;
+  int win, top, i;
+
+  assert (acc != NULL && dbv != NULL);
+  assert (DB_VALUE_DOMAIN_TYPE (dbv) == DB_TYPE_NUMERIC);
+
+  db_get_numeric_precision_and_scale (dbv, &val_prec, &val_scale, NULL);
+  val_neg = numeric_is_negative (dbv);
+
+  if (!acc->is_active)
+    {
+      /* first value: load it as the initial accumulator state */
+      memset (acc->words, 0, sizeof (acc->words));
+      numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
+			      &acc->words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
+			      NUMERIC_AS_WORD_BYTES);
+      acc->scale = val_scale;
+      acc->is_negative = val_neg;
+      for (i = NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
+	;
+      acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
+      acc->is_active = true;
+      return NO_ERROR;
+    }
+
+  /* load the incoming value right-aligned into a full-width buffer */
+  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
+			  &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
+			  NUMERIC_AS_WORD_BYTES);
+  for (i = NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
+    ;
+  val_used = NUMERIC_SUM_ACC_WORDS - i;
+
+  /* align scales; a no-op for fixed-scale columns (uses the full window for headroom) */
+  if (val_scale > acc->scale)
+    {
+      float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words), val_scale - acc->scale);
+      acc->scale = val_scale;
+      for (i = 0; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
+	;
+      acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
+    }
+  else if (val_scale < acc->scale)
+    {
+      float_numeric_mul_normalize (val_words, NUMERIC_SUM_ACC_WORDS, sizeof (val_words), acc->scale - val_scale);
+      for (i = 0; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
+	;
+      val_used = NUMERIC_SUM_ACC_WORDS - i;
+    }
+
+  /* signed addition over the active window only (one extra word absorbs the carry) */
+  win = MAX (acc->used_words, val_used) + 1;
+  if (win > NUMERIC_SUM_ACC_WORDS)
+    {
+      win = NUMERIC_SUM_ACC_WORDS;
+    }
+  top = NUMERIC_SUM_ACC_WORDS - win;
+
+  if (acc->is_negative == val_neg)
+    {
+      numeric_sum_acc_words_add (&acc->words[top], &val_words[top], &acc->words[top], win);
+    }
+  else if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
+    {
+      numeric_sum_acc_words_sub (&acc->words[top], &val_words[top], &acc->words[top], win);
+    }
+  else
+    {
+      numeric_sum_acc_words_sub (&val_words[top], &acc->words[top], &acc->words[top], win);
+      acc->is_negative = val_neg;
+    }
+
+  /* the carry propagation end point is the new used_words */
+  for (i = top; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
+    ;
+  acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
+  if (acc->used_words == 1 && acc->words[NUMERIC_SUM_ACC_WORDS - 1] == 0)
+    {
+      /* prevent -0; zero is always treated as positive */
+      acc->is_negative = false;
+    }
+
+  return NO_ERROR;
+}
+
+/*
+ * numeric_sum_acc_finalize () - convert an active word accumulator into a NUMERIC DB_VALUE
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
+ *   acc(in/out) : active word accumulator; deactivated on return
+ *   result(out) : resulting NUMERIC value
+ *
+ * Note:
+ *   - Performs the deferred steps once per group: digit counting, overflow
+ *     checking, rounding to DB_MAX_NUMERIC_PRECISION digits and packing.
+ */
+int
+numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+{
+  uint8_t result_buf[DB_NUMERIC_BUF_SIZE];
+  int result_prec, result_scale;
+  int win, top, ret;
+
+  assert (acc != NULL && acc->is_active && result != NULL);
+
+  win = acc->used_words + 1;
+  if (win > NUMERIC_SUM_ACC_WORDS)
+    {
+      win = NUMERIC_SUM_ACC_WORDS;
+    }
+  top = NUMERIC_SUM_ACC_WORDS - win;
+
+  result_scale = acc->scale;
+  result_prec = float_numeric_get_decimal_digit (&acc->words[top], win);
+  if (acc->is_negative && result_prec == 1 && acc->words[NUMERIC_SUM_ACC_WORDS - 1] == 0)
+    {
+      /* prevent -0; zero is always treated as positive */
+      acc->is_negative = false;
+    }
+
+  acc->is_active = false;
+
+  ret = float_numeric_check_overflow_and_adjust_scale (&result_prec, &result_scale, result);
+  if (ret != NO_ERROR)
+    {
+      return ret;
+    }
+
+  ret = float_numeric_round_and_pack (&acc->words[top], win, NUMERIC_GET_BYTE_COUNT (win), result_buf,
+				      &result_prec, &result_scale);
+  if (ret != NO_ERROR)
+    {
+      TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
+      er_set (ER_WARNING_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
+      db_value_domain_init (result, DB_TYPE_NUMERIC, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE);
+      return ret;
+    }
+
+  db_make_numeric (result, result_buf, result_prec, result_scale, DB_NUMERIC_BUF_SIZE, acc->is_negative, true);
+  return NO_ERROR;
+}
+
+/*
  * numeric_coerce_num_to_double () -
  *   return:
  *   num(in)    : DB_VALUE

@@ -120,6 +120,26 @@ qdata_process_distinct_or_sort (cubthread::entry *thread_p, cubxasl::aggregate_l
 }
 
 /*
+ * qdata_numeric_sum_acc_enabled () - POC gate for the NUMERIC SUM/AVG word accumulator
+ *   return: true if enabled via environment variable CUBRID_NUMSUM_ACC=1
+ *
+ * Note: POC only. Allows as-is/to-be comparison with a single binary.
+ */
+static bool
+qdata_numeric_sum_acc_enabled (void)
+{
+  static int enabled = -1;
+
+  if (enabled < 0)
+    {
+      const char *env = getenv ("CUBRID_NUMSUM_ACC");
+      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+
+  return enabled == 1;
+}
+
+/*
  * qdata_initialize_aggregate_list () -
  *   return: NO_ERROR, or ER_code
  *   agg_list(in)       : Aggregate expression node list
@@ -147,6 +167,7 @@ qdata_initialize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_
 
       /* CAUTION : if modify initializing ACC's value then should change qdata_alloc_agg_hvalue() */
       agg_p->accumulator.curr_cnt = 0;
+      agg_p->accumulator.num_sum_acc.is_active = false;
       if (db_value_domain_init (agg_p->accumulator.value, DB_VALUE_DOMAIN_TYPE (agg_p->accumulator.value),
 				DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE) != NO_ERROR)
 	{
@@ -222,6 +243,15 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
     case PT_AGG_BIT_XOR:
     case PT_AVG:
     case PT_SUM:
+      /* POC: if the source partial lives in a word accumulator, materialize it into
+       * new_acc->value first so it can be treated as an ordinary value below. */
+      if (new_acc->num_sum_acc.is_active)
+	{
+	  if (numeric_sum_acc_finalize (&new_acc->num_sum_acc, new_acc->value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
       // these functions only affect acc.value and new_acc can be treated as an ordinary value
       error = qdata_aggregate_value_to_accumulator (thread_p, acc, acc_dom, func_type, func_domain, new_acc->value, true);
       break;
@@ -473,6 +503,35 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 
     case PT_AVG:
     case PT_SUM:
+      /* POC: NUMERIC values accumulate into the word accumulator; rounding and packing
+       * are deferred to finalize. acc->value keeps the first value only (its domain info
+       * is still needed); readers of intermediate acc->value must materialize first. */
+      if (qdata_numeric_sum_acc_enabled () && DB_VALUE_DOMAIN_TYPE (value) == DB_TYPE_NUMERIC)
+	{
+	  if (acc->curr_cnt < 1)
+	    {
+	      /* first value of this group; discard any stale word state */
+	      acc->num_sum_acc.is_active = false;
+	      copy_operator = true;
+	    }
+	  else if (!acc->num_sum_acc.is_active && DB_VALUE_DOMAIN_TYPE (acc->value) == DB_TYPE_NUMERIC
+		   && !DB_IS_NULL (acc->value))
+	    {
+	      /* acc->value holds a partial sum (e.g. loaded from a hash partial list);
+	       * seed the word accumulator with it before accumulating on top of it */
+	      if (numeric_sum_acc_add_value (&acc->num_sum_acc, acc->value) != NO_ERROR)
+		{
+		  return ER_FAILED;
+		}
+	    }
+
+	  if (numeric_sum_acc_add_value (&acc->num_sum_acc, value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+	}
+
       if (acc->curr_cnt < 1)
 	{
 	  copy_operator = true;
@@ -1347,6 +1406,17 @@ qdata_finalize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  continue;
 	}
 
+      /* POC: materialize the word accumulator into acc->value once, before any consumer
+       * (AVG's division below, domain casts) reads it. this is the single rounding point. */
+      if ((agg_p->function == PT_SUM || agg_p->function == PT_AVG) && agg_p->accumulator.num_sum_acc.is_active)
+	{
+	  error = numeric_sum_acc_finalize (&agg_p->accumulator.num_sum_acc, agg_p->accumulator.value);
+	  if (error != NO_ERROR)
+	    {
+	      goto exit;
+	    }
+	}
+
       if (agg_p->function == PT_CUME_DIST)
 	{
 	  /* calculate the result for CUME_DIST */
@@ -2139,6 +2209,7 @@ qdata_alloc_agg_hvalue (cubthread::entry *thread_p, int func_cnt, cubxasl::aggre
     {
       value->accumulators[i].value = pr_make_value ();
       value->accumulators[i].value2 = pr_make_value ();
+      value->accumulators[i].num_sum_acc.is_active = false;
     }
   /* initialize accumulators.value */
   for (i = 0, agg_p = g_agg_list; agg_p != NULL; agg_p = agg_p->next, i++)
@@ -2446,6 +2517,9 @@ qdata_load_agg_hvalue_in_agg_list (aggregate_hash_value *value, cubxasl::aggrega
 
       if (agg_list->function != PT_GROUPBY_NUM)
 	{
+	  /* POC: the word accumulator state travels with the accumulator (plain data) */
+	  agg_list->accumulator.num_sum_acc = value->accumulators[i].num_sum_acc;
+
 	  if (copy_vals)
 	    {
 	      /* set tuple count */
@@ -2519,6 +2593,16 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
 
   for (i = 0; i < value->func_count; i++)
     {
+      /* POC: a spilled partial is saved as an ordinary DB_VALUE; materialize the word
+       * accumulator first. (rounding at a spill boundary; see the design note) */
+      if (value->accumulators[i].num_sum_acc.is_active)
+	{
+	  if (numeric_sum_acc_finalize (&value->accumulators[i].num_sum_acc, value->accumulators[i].value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+
       list_id->tpl_descr.f_valp[col++] = value->accumulators[i].value;
       list_id->tpl_descr.f_valp[col++] = value->accumulators[i].value2;
 
