@@ -4112,43 +4112,42 @@ float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_buf, int prec
 }
 
 /*
- * numeric_sum_acc_words_add () - add two word windows with a hardware carry chain
- *   return: carry out of the most significant word (nonzero means the sum
- *           outgrew the window; possible only when the window is already
- *           clamped to NUMERIC_SUM_ACC_WORDS, since the window otherwise
- *           includes a zero headroom word that absorbs the carry)
+ * numeric_sum_acc_words_addsub () - add or subtract two word windows with a
+ *                                   hardware carry/borrow chain (r = a +/- b)
+ *   return: carry (add) or borrow (subtract) out of the most significant word.
+ *           For add, nonzero means the sum outgrew the window; possible only
+ *           when the window is already clamped to NUMERIC_SUM_ACC_WORDS, since
+ *           the window otherwise includes a zero headroom word that absorbs
+ *           the carry. For subtract, the precondition |a| >= |b| within the
+ *           window guarantees a zero borrow.
  *
- * Note: same-index read-then-write, so result may alias either input.
+ * Note:
+ *   - is_subtract is a compile-time constant at every call site, so the
+ *     branch folds away after inlining.
+ *   - same-index read-then-write, so result may alias either input.
  */
 static inline unsigned char
-numeric_sum_acc_words_add (const uint64_t * a, const uint64_t * b, uint64_t * r, int n)
+numeric_sum_acc_words_addsub (const uint64_t * a, const uint64_t * b, uint64_t * r, int n, bool is_subtract)
 {
   unsigned char c = 0;
   int d;
 
-  for (d = n - 1; d >= 0; d--)
+  if (is_subtract)
     {
-      c = _addcarry_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
+      for (d = n - 1; d >= 0; d--)
+	{
+	  c = _subborrow_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
+	}
+    }
+  else
+    {
+      for (d = n - 1; d >= 0; d--)
+	{
+	  c = _addcarry_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
+	}
     }
 
   return c;
-}
-
-/*
- * numeric_sum_acc_words_sub () - subtract two word windows with a hardware borrow chain
- *
- * Note: precondition |a| >= |b| within the window; result may alias either input.
- */
-static inline void
-numeric_sum_acc_words_sub (const uint64_t * a, const uint64_t * b, uint64_t * r, int n)
-{
-  unsigned char c = 0;
-  int d;
-
-  for (d = n - 1; d >= 0; d--)
-    {
-      c = _subborrow_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
-    }
 }
 
 /*
@@ -4203,9 +4202,9 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
 			  &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
 			  NUMERIC_AS_WORD_BYTES);
-  for (i = NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
-    ;
-  val_used = NUMERIC_SUM_ACC_WORDS - i;
+  /* branch-free count of the active low words of the 3-word window */
+  val_used = 1 + (int) ((val_words[NUMERIC_SUM_ACC_WORDS - 3] | val_words[NUMERIC_SUM_ACC_WORDS - 2]) != 0)
+    + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 3] != 0);
   val_p = &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS];
   val_win = NUMERIC_AS_WORDS;
 
@@ -4247,9 +4246,9 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
     {
       /* same sign (the common case): add only the value's active words onto the
        * accumulator's low words, then ride the carry upward until it dies */
-      carry = numeric_sum_acc_words_add (&acc->words[NUMERIC_SUM_ACC_WORDS - val_used],
-					 &val_p[val_win - val_used],
-					 &acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_used);
+      carry = numeric_sum_acc_words_addsub (&acc->words[NUMERIC_SUM_ACC_WORDS - val_used],
+					    &val_p[val_win - val_used],
+					    &acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_used, false);
       p = NUMERIC_SUM_ACC_WORDS - val_used - 1;
       while (carry != 0 && p >= 0)
 	{
@@ -4296,11 +4295,11 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 
   if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
     {
-      numeric_sum_acc_words_sub (&acc->words[top], &val_words[top], &acc->words[top], win);
+      (void) numeric_sum_acc_words_addsub (&acc->words[top], &val_words[top], &acc->words[top], win, true);
     }
   else
     {
-      numeric_sum_acc_words_sub (&val_words[top], &acc->words[top], &acc->words[top], win);
+      (void) numeric_sum_acc_words_addsub (&val_words[top], &acc->words[top], &acc->words[top], win, true);
       acc->is_negative = val_neg;
     }
 
