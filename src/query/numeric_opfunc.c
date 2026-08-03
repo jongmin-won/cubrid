@@ -4189,9 +4189,9 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 			      NUMERIC_AS_WORD_BYTES);
       acc->scale = val_scale;
       acc->is_negative = val_neg;
-      for (i = NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
-	;
-      acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
+      /* precision upper-bounds the stored digits; see the load path below */
+      acc->used_words = NUMERIC_GET_WORD_COUNT (_gv_numeric_precision_to_bytes_lookup[val_prec]);
+      assert (acc->used_words >= 1 && acc->used_words <= NUMERIC_AS_WORDS);
       acc->is_active = true;
       return NO_ERROR;
     }
@@ -4202,20 +4202,28 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
 			  &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
 			  NUMERIC_AS_WORD_BYTES);
-  /* branch-free count of the active low words of the 3-word window */
-  val_used = 1 + (int) ((val_words[NUMERIC_SUM_ACC_WORDS - 3] | val_words[NUMERIC_SUM_ACC_WORDS - 2]) != 0)
-    + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 3] != 0);
+  /* the header precision is an upper bound of the stored digits (exact for
+   * float NUMERIC, declared for fixed columns), so the active word count
+   * follows from it through the engine's precision-to-bytes lookup */
+  val_used = NUMERIC_GET_WORD_COUNT (_gv_numeric_precision_to_bytes_lookup[val_prec]);
+  assert (val_used >= 1 && val_used <= NUMERIC_AS_WORDS);
+  assert (val_used >= 1 + (int) ((val_words[NUMERIC_SUM_ACC_WORDS - 3] | val_words[NUMERIC_SUM_ACC_WORDS - 2]) != 0)
+	  + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 3] != 0));
   val_p = &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS];
   val_win = NUMERIC_AS_WORDS;
 
   /* align scales; a no-op for fixed-scale columns */
   if (val_scale > acc->scale)
     {
+      /* x10^k grows the value by exactly k decimal digits, so the new window
+       * is bounded from the shift itself -- no rescan needed */
       float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words), val_scale - acc->scale);
+      acc->used_words += (val_scale - acc->scale) / 19 + 1;
+      if (acc->used_words > NUMERIC_SUM_ACC_WORDS)
+	{
+	  acc->used_words = NUMERIC_SUM_ACC_WORDS;
+	}
       acc->scale = val_scale;
-      for (i = 0; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
-	;
-      acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
     }
   else if (val_scale < acc->scale)
     {
@@ -4235,9 +4243,8 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       memset (&val_words[NUMERIC_SUM_ACC_WORDS - w], 0, (size_t) (w - NUMERIC_AS_WORDS) * sizeof (uint64_t));
       float_numeric_mul_normalize (&val_words[NUMERIC_SUM_ACC_WORDS - w], w, w * (int) sizeof (uint64_t),
 				   acc->scale - val_scale);
-      for (i = NUMERIC_SUM_ACC_WORDS - w; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
-	;
-      val_used = NUMERIC_SUM_ACC_WORDS - i;
+      /* w already bounds the widened value (val_used + shift words), reuse it */
+      val_used = w;
       val_p = &val_words[NUMERIC_SUM_ACC_WORDS - w];
       val_win = w;
     }
@@ -4280,12 +4287,9 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 
   /* mixed sign (rare in SUM workloads): the value is already staged
    * right-aligned in val_words; zero only the window words above it and
-   * reuse the symmetric windowed subtraction */
-  win = MAX (acc->used_words, val_used) + 1;
-  if (win > NUMERIC_SUM_ACC_WORDS)
-    {
-      win = NUMERIC_SUM_ACC_WORDS;
-    }
+   * reuse the symmetric windowed subtraction. A magnitude subtraction cannot
+   * grow past the larger operand, so no headroom word is needed */
+  win = MAX (acc->used_words, val_used);
   top = NUMERIC_SUM_ACC_WORDS - win;
 
   if (win > val_win)
