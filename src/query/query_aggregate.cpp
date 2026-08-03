@@ -764,6 +764,20 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	      continue;
 	    }
 
+	  if (accumulator->num_sum_acc.is_active && DB_VALUE_DOMAIN_TYPE (peek_val) == DB_TYPE_NUMERIC)
+	    {
+	      /* the word accumulator is live: feed it directly, skipping the
+	       * per-function dispatch (first values, partial-sum seeding and
+	       * non-NUMERIC rows still take the full path below) */
+	      if (numeric_sum_acc_add_value (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
+		{
+		  return ER_FAILED;
+		}
+
+	      accumulator->curr_cnt++;
+	      continue;
+	    }
+
 	  error = qdata_aggregate_value_to_accumulator (thread_p, accumulator, &agg_p->accumulator_domain,
 							agg_p->function, agg_p->domain, peek_val, false);
 	  if (error != NO_ERROR)
