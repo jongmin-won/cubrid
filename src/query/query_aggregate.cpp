@@ -744,6 +744,37 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  continue;
 	}
 
+      /* POC fast path: a single-operand SUM/AVG consumes the operand immediately
+       * (the first value is deep-copied inside qdata_aggregate_value_to_accumulator,
+       * later values are only read), so peek the operand instead of deep-copying it
+       * into a per-row vector */
+      if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
+	  && agg_p->operands != NULL && agg_p->operands->next == NULL && agg_p->option != Q_DISTINCT
+	  && agg_p->sort_list == NULL && !agg_p->flag.min_max_optimized)
+	{
+	  DB_VALUE *peek_val = NULL;
+
+	  if (fetch_peek_dbval (thread_p, &agg_p->operands->value, val_desc_p, NULL, NULL, NULL, &peek_val) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  if (DB_IS_NULL (peek_val))
+	    {
+	      continue;
+	    }
+
+	  error = qdata_aggregate_value_to_accumulator (thread_p, accumulator, &agg_p->accumulator_domain,
+							agg_p->function, agg_p->domain, peek_val, false);
+	  if (error != NO_ERROR)
+	    {
+	      return error;
+	    }
+
+	  accumulator->curr_cnt++;
+	  continue;
+	}
+
       /* fetch operands value. aggregate regulator variable should only contain constants */
       REGU_VARIABLE_LIST operand = NULL;
       for (operand = agg_p->operands; operand != NULL; operand = operand->next)
