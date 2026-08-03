@@ -4107,8 +4107,7 @@ numeric_sum_acc_words_sub (const uint64_t * a, const uint64_t * b, uint64_t * r,
 int
 numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 {
-  uint64_t val_words[NUMERIC_SUM_ACC_WORDS];	/* full-width staging; initialized only when actually needed */
-  uint64_t val3[NUMERIC_AS_WORDS];	/* landing zone for the raw 17-byte coefficient */
+  uint64_t val_words[NUMERIC_SUM_ACC_WORDS];	/* staging; only the words actually used are ever written */
   const uint64_t *val_p;
   int val_win, val_prec, val_scale, val_used;
   bool val_neg;
@@ -4137,13 +4136,16 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       return NO_ERROR;
     }
 
-  /* load the raw coefficient into a 3-word window; numeric_bytes_to_words ()
-   * writes every word of the window, so no zero fill is needed */
-  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE, val3, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES);
-  for (i = 0; i < NUMERIC_AS_WORDS - 1 && val3[i] == 0; i++)
+  /* load the raw coefficient right-aligned into the staging tail;
+   * numeric_bytes_to_words () writes every word of the 3-word window,
+   * so no zero fill is needed */
+  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
+			  &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
+			  NUMERIC_AS_WORD_BYTES);
+  for (i = NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
     ;
-  val_used = NUMERIC_AS_WORDS - i;
-  val_p = val3;
+  val_used = NUMERIC_SUM_ACC_WORDS - i;
+  val_p = &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS];
   val_win = NUMERIC_AS_WORDS;
 
   /* align scales; a no-op for fixed-scale columns */
@@ -4169,8 +4171,8 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 	{
 	  w = NUMERIC_SUM_ACC_WORDS;
 	}
+      /* the coefficient is already in place at the tail; zero only the headroom */
       memset (&val_words[NUMERIC_SUM_ACC_WORDS - w], 0, (size_t) (w - NUMERIC_AS_WORDS) * sizeof (uint64_t));
-      memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
       float_numeric_mul_normalize (&val_words[NUMERIC_SUM_ACC_WORDS - w], w, w * (int) sizeof (uint64_t),
 				   acc->scale - val_scale);
       for (i = NUMERIC_SUM_ACC_WORDS - w; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
@@ -4216,9 +4218,9 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       return NO_ERROR;
     }
 
-  /* mixed sign (rare in SUM workloads): stage the value right-aligned in
-   * val_words with only the subtraction window initialized, and reuse the
-   * symmetric windowed subtraction */
+  /* mixed sign (rare in SUM workloads): the value is already staged
+   * right-aligned in val_words; zero only the window words above it and
+   * reuse the symmetric windowed subtraction */
   win = MAX (acc->used_words, val_used) + 1;
   if (win > NUMERIC_SUM_ACC_WORDS)
     {
@@ -4226,14 +4228,8 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
     }
   top = NUMERIC_SUM_ACC_WORDS - win;
 
-  if (val_p == val3)
-    {
-      memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
-      val_win = NUMERIC_AS_WORDS;
-    }
   if (win > val_win)
     {
-      /* zero only the window words above the staged value */
       memset (&val_words[top], 0, (size_t) (win - val_win) * sizeof (uint64_t));
     }
 
