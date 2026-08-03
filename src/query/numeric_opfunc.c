@@ -4052,10 +4052,14 @@ float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_buf, int prec
 
 /*
  * numeric_sum_acc_words_add () - add two word windows with a hardware carry chain
+ *   return: carry out of the most significant word (nonzero means the sum
+ *           outgrew the window; possible only when the window is already
+ *           clamped to NUMERIC_SUM_ACC_WORDS, since the window otherwise
+ *           includes a zero headroom word that absorbs the carry)
  *
  * Note: same-index read-then-write, so result may alias either input.
  */
-static inline void
+static inline unsigned char
 numeric_sum_acc_words_add (const uint64_t * a, const uint64_t * b, uint64_t * r, int n)
 {
   unsigned char c = 0;
@@ -4065,6 +4069,8 @@ numeric_sum_acc_words_add (const uint64_t * a, const uint64_t * b, uint64_t * r,
     {
       c = _addcarry_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
     }
+
+  return c;
 }
 
 /*
@@ -4086,7 +4092,7 @@ numeric_sum_acc_words_sub (const uint64_t * a, const uint64_t * b, uint64_t * r,
 
 /*
  * numeric_sum_acc_add_value () - accumulate a NUMERIC value into a word-based SUM/AVG accumulator
- *   return: NO_ERROR
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW when the running sum outgrows the word buffer
  *   acc(in/out) : word accumulator; activated by the first accumulated value
  *   dbv(in)     : NUMERIC value to accumulate
  *
@@ -4161,7 +4167,17 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 
   if (acc->is_negative == val_neg)
     {
-      numeric_sum_acc_words_add (&acc->words[top], &val_words[top], &acc->words[top], win);
+      if (numeric_sum_acc_words_add (&acc->words[top], &val_words[top], &acc->words[top], win) != 0)
+	{
+	  /* carry out of the full buffer: |sum| >= 2^896 (~10^269), beyond the
+	   * representable range (10^254) where the legacy per-row path overflows
+	   * even earlier; never round away silently */
+	  TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
+
+	  acc->is_active = false;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
+	  return ER_IT_DATA_OVERFLOW;
+	}
     }
   else if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
     {
