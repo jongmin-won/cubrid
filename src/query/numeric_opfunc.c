@@ -4112,7 +4112,7 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   const uint64_t *val_p;
   int val_win, val_prec, val_scale, val_used;
   bool val_neg;
-  int win, top, i, p, new_used;
+  int win, top, i, p, new_used, w;
   unsigned char carry;
 
   assert (acc != NULL && dbv != NULL);
@@ -4157,15 +4157,27 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
     }
   else if (val_scale < acc->scale)
     {
-      /* the value itself must be widened; only this branch pays for the full-width staging */
-      memset (val_words, 0, sizeof (val_words) - sizeof (val3));
+      /* the value itself must be widened; stage it in a window just wide enough
+       * for the product (10^19 fits in one word, so the shift adds at most
+       * diff / 19 + 1 words) */
+      w = val_used + (acc->scale - val_scale) / 19 + 1;
+      if (w < NUMERIC_AS_WORDS)
+	{
+	  w = NUMERIC_AS_WORDS;
+	}
+      if (w > NUMERIC_SUM_ACC_WORDS)
+	{
+	  w = NUMERIC_SUM_ACC_WORDS;
+	}
+      memset (&val_words[NUMERIC_SUM_ACC_WORDS - w], 0, (size_t) (w - NUMERIC_AS_WORDS) * sizeof (uint64_t));
       memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
-      float_numeric_mul_normalize (val_words, NUMERIC_SUM_ACC_WORDS, sizeof (val_words), acc->scale - val_scale);
-      for (i = 0; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
+      float_numeric_mul_normalize (&val_words[NUMERIC_SUM_ACC_WORDS - w], w, w * (int) sizeof (uint64_t),
+				   acc->scale - val_scale);
+      for (i = NUMERIC_SUM_ACC_WORDS - w; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
 	;
       val_used = NUMERIC_SUM_ACC_WORDS - i;
-      val_p = val_words;
-      val_win = NUMERIC_SUM_ACC_WORDS;
+      val_p = &val_words[NUMERIC_SUM_ACC_WORDS - w];
+      val_win = w;
     }
 
   if (acc->is_negative == val_neg)
@@ -4204,19 +4216,26 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       return NO_ERROR;
     }
 
-  /* mixed sign (rare in SUM workloads): stage the value at full width and
-   * reuse the symmetric windowed subtraction */
-  if (val_p == val3)
-    {
-      memset (val_words, 0, sizeof (val_words) - sizeof (val3));
-      memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
-    }
+  /* mixed sign (rare in SUM workloads): stage the value right-aligned in
+   * val_words with only the subtraction window initialized, and reuse the
+   * symmetric windowed subtraction */
   win = MAX (acc->used_words, val_used) + 1;
   if (win > NUMERIC_SUM_ACC_WORDS)
     {
       win = NUMERIC_SUM_ACC_WORDS;
     }
   top = NUMERIC_SUM_ACC_WORDS - win;
+
+  if (val_p == val3)
+    {
+      memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
+      val_win = NUMERIC_AS_WORDS;
+    }
+  if (win > val_win)
+    {
+      /* zero only the window words above the staged value */
+      memset (&val_words[top], 0, (size_t) (win - val_win) * sizeof (uint64_t));
+    }
 
   if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
     {
