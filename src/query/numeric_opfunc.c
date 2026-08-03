@@ -4100,15 +4100,20 @@ numeric_sum_acc_words_sub (const uint64_t * a, const uint64_t * b, uint64_t * r,
  *   - Performs only conversion, scale alignment and signed word addition per value.
  *     Digit counting, overflow checking, rounding and packing are deferred to
  *     numeric_sum_acc_finalize (), so rounding happens exactly once per group.
- *   - Operates on the active word window only (used_words + 1 carry word).
+ *   - Same-sign accumulation touches only the value's active words plus the
+ *     carry chain; the full-width staging buffer is initialized only on the
+ *     rare paths (scale widening of the value, mixed-sign subtraction).
  */
 int
 numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 {
-  uint64_t val_words[NUMERIC_SUM_ACC_WORDS] = { 0 };
-  int val_prec, val_scale, val_used;
+  uint64_t val_words[NUMERIC_SUM_ACC_WORDS];	/* full-width staging; initialized only when actually needed */
+  uint64_t val3[NUMERIC_AS_WORDS];	/* landing zone for the raw 17-byte coefficient */
+  const uint64_t *val_p;
+  int val_win, val_prec, val_scale, val_used;
   bool val_neg;
-  int win, top, i;
+  int win, top, i, p, new_used;
+  unsigned char carry;
 
   assert (acc != NULL && dbv != NULL);
   assert (DB_VALUE_DOMAIN_TYPE (dbv) == DB_TYPE_NUMERIC);
@@ -4132,15 +4137,16 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       return NO_ERROR;
     }
 
-  /* load the incoming value right-aligned into a full-width buffer */
-  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
-			  &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
-			  NUMERIC_AS_WORD_BYTES);
-  for (i = NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
+  /* load the raw coefficient into a 3-word window; numeric_bytes_to_words ()
+   * writes every word of the window, so no zero fill is needed */
+  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE, val3, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES);
+  for (i = 0; i < NUMERIC_AS_WORDS - 1 && val3[i] == 0; i++)
     ;
-  val_used = NUMERIC_SUM_ACC_WORDS - i;
+  val_used = NUMERIC_AS_WORDS - i;
+  val_p = val3;
+  val_win = NUMERIC_AS_WORDS;
 
-  /* align scales; a no-op for fixed-scale columns (uses the full window for headroom) */
+  /* align scales; a no-op for fixed-scale columns */
   if (val_scale > acc->scale)
     {
       float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words), val_scale - acc->scale);
@@ -4151,23 +4157,31 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
     }
   else if (val_scale < acc->scale)
     {
+      /* the value itself must be widened; only this branch pays for the full-width staging */
+      memset (val_words, 0, sizeof (val_words) - sizeof (val3));
+      memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
       float_numeric_mul_normalize (val_words, NUMERIC_SUM_ACC_WORDS, sizeof (val_words), acc->scale - val_scale);
       for (i = 0; i < NUMERIC_SUM_ACC_WORDS - 1 && val_words[i] == 0; i++)
 	;
       val_used = NUMERIC_SUM_ACC_WORDS - i;
+      val_p = val_words;
+      val_win = NUMERIC_SUM_ACC_WORDS;
     }
-
-  /* signed addition over the active window only (one extra word absorbs the carry) */
-  win = MAX (acc->used_words, val_used) + 1;
-  if (win > NUMERIC_SUM_ACC_WORDS)
-    {
-      win = NUMERIC_SUM_ACC_WORDS;
-    }
-  top = NUMERIC_SUM_ACC_WORDS - win;
 
   if (acc->is_negative == val_neg)
     {
-      if (numeric_sum_acc_words_add (&acc->words[top], &val_words[top], &acc->words[top], win) != 0)
+      /* same sign (the common case): add only the value's active words onto the
+       * accumulator's low words, then ride the carry upward until it dies */
+      carry = numeric_sum_acc_words_add (&acc->words[NUMERIC_SUM_ACC_WORDS - val_used],
+					 &val_p[val_win - val_used],
+					 &acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_used);
+      p = NUMERIC_SUM_ACC_WORDS - val_used - 1;
+      while (carry != 0 && p >= 0)
+	{
+	  carry = _addcarry_u64 (carry, acc->words[p], 0, (unsigned long long *) &acc->words[p]);
+	  p--;
+	}
+      if (carry != 0)
 	{
 	  /* carry out of the full buffer: |sum| >= 2^896 (~10^269), beyond the
 	   * representable range (10^254) where the legacy per-row path overflows
@@ -4178,8 +4192,33 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
 	  return ER_IT_DATA_OVERFLOW;
 	}
+
+      /* O(1) update: a magnitude add never shrinks the window, and if the carry
+       * stopped at word (p + 1) that word is now nonzero */
+      new_used = MAX (acc->used_words, val_used);
+      if (NUMERIC_SUM_ACC_WORDS - (p + 1) > new_used)
+	{
+	  new_used = NUMERIC_SUM_ACC_WORDS - (p + 1);
+	}
+      acc->used_words = new_used;
+      return NO_ERROR;
     }
-  else if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
+
+  /* mixed sign (rare in SUM workloads): stage the value at full width and
+   * reuse the symmetric windowed subtraction */
+  if (val_p == val3)
+    {
+      memset (val_words, 0, sizeof (val_words) - sizeof (val3));
+      memcpy (&val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], val3, sizeof (val3));
+    }
+  win = MAX (acc->used_words, val_used) + 1;
+  if (win > NUMERIC_SUM_ACC_WORDS)
+    {
+      win = NUMERIC_SUM_ACC_WORDS;
+    }
+  top = NUMERIC_SUM_ACC_WORDS - win;
+
+  if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
     {
       numeric_sum_acc_words_sub (&acc->words[top], &val_words[top], &acc->words[top], win);
     }
@@ -4189,7 +4228,7 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       acc->is_negative = val_neg;
     }
 
-  /* the carry propagation end point is the new used_words */
+  /* the borrow can hollow out any prefix of the window, so rescan for the top word */
   for (i = top; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
     ;
   acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
