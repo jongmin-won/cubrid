@@ -206,5 +206,6 @@ struct numeric_sum_acc
 };
 
 extern int numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
+extern int numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 extern int numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 #endif /* _NUMERIC_OPFUNC_H_ */

@@ -40,6 +40,26 @@ static int qdata_analytic_interpolation (cubthread::entry *thread_p, cubxasl::an
     QFILE_LIST_SCAN_ID *scan_id);
 
 /*
+ * qdata_analytic_numeric_sum_acc_enabled () - POC gate for the NUMERIC SUM/AVG word accumulator
+ *   return: true if enabled via environment variable CUBRID_NUMSUM_ACC=1
+ *
+ * Note: POC only; same gate as the aggregate path (query_aggregate.cpp).
+ */
+static bool
+qdata_analytic_numeric_sum_acc_enabled (void)
+{
+  static int enabled = -1;
+
+  if (enabled < 0)
+    {
+      const char *env = getenv ("CUBRID_NUMSUM_ACC");
+      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+
+  return enabled == 1;
+}
+
+/*
  * qdata_initialize_analytic_func () -
  *   return: NO_ERROR, or ER_code
  *   func_p(in): Analytic expression node
@@ -50,6 +70,7 @@ int
 qdata_initialize_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p, QUERY_ID query_id)
 {
   func_p->curr_cnt = 0;
+  func_p->num_sum_acc.is_active = false;
   if (db_value_domain_init (func_p->value, DB_VALUE_DOMAIN_TYPE (func_p->value), DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE)
       != NO_ERROR)
     {
@@ -344,6 +365,45 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 
     case PT_AVG:
     case PT_SUM:
+      /* POC: NUMERIC values accumulate into the word accumulator; the running value is
+       * emitted as a rounded snapshot of the exact sum at each sort key group boundary
+       * (qdata_finalize_analytic_func), so every emitted value is drift-free and the
+       * last one matches the aggregate SUM. */
+      if (qdata_analytic_numeric_sum_acc_enabled () && DB_VALUE_DOMAIN_TYPE (&dbval) == DB_TYPE_NUMERIC)
+	{
+	  if (func_p->curr_cnt < 1)
+	    {
+	      /* first value of this partition; discard any stale word state */
+	      func_p->num_sum_acc.is_active = false;
+	      opr_dbval_p = &dbval;
+	      copy_opr = true;
+
+	      if (db_value_domain_init (func_p->value, DB_VALUE_DOMAIN_TYPE (&dbval), DB_DEFAULT_PRECISION,
+					DB_DEFAULT_SCALE) != NO_ERROR)
+		{
+		  error = ER_FAILED;
+		  goto exit;
+		}
+	    }
+	  else if (!func_p->num_sum_acc.is_active && DB_VALUE_DOMAIN_TYPE (func_p->value) == DB_TYPE_NUMERIC
+		   && !DB_IS_NULL (func_p->value))
+	    {
+	      /* func_p->value holds a reinstated partial sum (part_value); seed it first */
+	      if (numeric_sum_acc_add_value (&func_p->num_sum_acc, func_p->value) != NO_ERROR)
+		{
+		  error = ER_FAILED;
+		  goto exit;
+		}
+	    }
+
+	  if (numeric_sum_acc_add_value (&func_p->num_sum_acc, &dbval) != NO_ERROR)
+	    {
+	      error = ER_FAILED;
+	      goto exit;
+	    }
+	  break;
+	}
+
       if (func_p->curr_cnt < 1)
 	{
 	  opr_dbval_p = &dbval;
@@ -968,6 +1028,17 @@ qdata_finalize_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 
 	  qfile_close_scan (thread_p, &scan_id);
 	  func_p->curr_cnt = list_id_p->tuple_cnt;
+	}
+    }
+
+  /* POC: materialize the exact word accumulator into func_p->value as a rounded snapshot.
+   * the accumulator stays active so cumulative evaluation keeps accumulating on the exact
+   * state; this is the per-emission rounding point (rounding never feeds back). */
+  if ((func_p->function == PT_SUM || func_p->function == PT_AVG) && func_p->num_sum_acc.is_active)
+    {
+      if (numeric_sum_acc_snapshot (&func_p->num_sum_acc, func_p->value) != NO_ERROR)
+	{
+	  goto error;
 	}
     }
 

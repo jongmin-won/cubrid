@@ -25,6 +25,7 @@
 
 #include "dbtype_def.h"
 #include "db_function.hpp"          // FUNC_CODE
+#include "numeric_opfunc.h"         // NUMERIC_SUM_ACC (POC)
 #include "regu_var.hpp"             // regu_variable_node
 #include "storage_common.h"       // QUERY_OPTIONS
 
@@ -97,6 +98,7 @@ namespace cubxasl
     db_value *value2;		/* for STTDEV and VARIANCE */
     db_value *out_value;		/* DB_VALUE used for output */
     db_value part_value;		/* partition temporary accumulator */
+    NUMERIC_SUM_ACC num_sum_acc;	/* POC: word accumulator for NUMERIC SUM/AVG */
     INT64 curr_cnt;			/* current number of items */
     bool is_first_exec_time;	/* the fist time to be executed */
 

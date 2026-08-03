@@ -4187,40 +4187,54 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 }
 
 /*
- * numeric_sum_acc_finalize () - convert an active word accumulator into a NUMERIC DB_VALUE
+ * numeric_sum_acc_snapshot () - write the rounded value of an active word accumulator
+ *                               into a NUMERIC DB_VALUE, keeping the accumulator intact
  *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
- *   acc(in/out) : active word accumulator; deactivated on return
+ *   acc(in)     : active word accumulator; NOT modified (rounding works on a copy)
  *   result(out) : resulting NUMERIC value
  *
  * Note:
- *   - Performs the deferred steps once per group: digit counting, overflow
- *     checking, rounding to DB_MAX_NUMERIC_PRECISION digits and packing.
+ *   - Performs the deferred steps: digit counting, overflow checking, rounding
+ *     to DB_MAX_NUMERIC_PRECISION digits and packing.
+ *   - Used by cumulative analytic functions, which emit a running value per
+ *     sort key group and keep accumulating afterwards.
  */
 int
-numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
 {
+  uint64_t work[NUMERIC_SUM_ACC_WORDS];
   uint8_t result_buf[DB_NUMERIC_BUF_SIZE];
   int result_prec, result_scale;
   int win, top, ret;
+  bool is_negative;
 
   assert (acc != NULL && acc->is_active && result != NULL);
 
+  /* the window must span at least NUMERIC_AS_WORDS words: numeric_words_to_bytes ()
+   * computes its word pointer as src + (src_words - NUMERIC_AS_WORDS) and would read
+   * below a smaller window. acc->words below used_words are zero, so copying them is safe. */
   win = acc->used_words + 1;
+  if (win < NUMERIC_AS_WORDS)
+    {
+      win = NUMERIC_AS_WORDS;
+    }
   if (win > NUMERIC_SUM_ACC_WORDS)
     {
       win = NUMERIC_SUM_ACC_WORDS;
     }
   top = NUMERIC_SUM_ACC_WORDS - win;
 
+  /* rounding divides the word buffer in place, so work on a copy */
+  memcpy (&work[top], &acc->words[top], (size_t) win * sizeof (uint64_t));
+
   result_scale = acc->scale;
-  result_prec = float_numeric_get_decimal_digit (&acc->words[top], win);
-  if (acc->is_negative && result_prec == 1 && acc->words[NUMERIC_SUM_ACC_WORDS - 1] == 0)
+  is_negative = acc->is_negative;
+  result_prec = float_numeric_get_decimal_digit (&work[top], win);
+  if (is_negative && result_prec == 1 && work[NUMERIC_SUM_ACC_WORDS - 1] == 0)
     {
       /* prevent -0; zero is always treated as positive */
-      acc->is_negative = false;
+      is_negative = false;
     }
-
-  acc->is_active = false;
 
   ret = float_numeric_check_overflow_and_adjust_scale (&result_prec, &result_scale, result);
   if (ret != NO_ERROR)
@@ -4228,7 +4242,7 @@ numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
       return ret;
     }
 
-  ret = float_numeric_round_and_pack (&acc->words[top], win, NUMERIC_GET_BYTE_COUNT (win), result_buf,
+  ret = float_numeric_round_and_pack (&work[top], win, NUMERIC_GET_BYTE_COUNT (win), result_buf,
 				      &result_prec, &result_scale);
   if (ret != NO_ERROR)
     {
@@ -4238,8 +4252,25 @@ numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
       return ret;
     }
 
-  db_make_numeric (result, result_buf, result_prec, result_scale, DB_NUMERIC_BUF_SIZE, acc->is_negative, true);
+  db_make_numeric (result, result_buf, result_prec, result_scale, DB_NUMERIC_BUF_SIZE, is_negative, true);
   return NO_ERROR;
+}
+
+/*
+ * numeric_sum_acc_finalize () - convert an active word accumulator into a NUMERIC DB_VALUE
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
+ *   acc(in/out) : active word accumulator; deactivated on return
+ *   result(out) : resulting NUMERIC value
+ *
+ * Note: the single rounding point per group for aggregate SUM/AVG.
+ */
+int
+numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+{
+  int ret = numeric_sum_acc_snapshot (acc, result);
+
+  acc->is_active = false;
+  return ret;
 }
 
 /*
