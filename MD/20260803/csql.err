@@ -1,0 +1,446 @@
+
+Time: 08/04/26 16:53:06.399 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/query/vacuum.c, line 1005  CODE = -1190, Tran = -1, EID = 1
+Stand-alone vacuum execution is started.
+
+Time: 08/04/26 16:53:06.404 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/query/vacuum.c, line 1098  CODE = -1191, Tran = -1, EID = 2
+Stand-alone vacuum execution is ended.
+
+Time: 08/04/26 16:53:06.419 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_sr.c, line 238  CODE = -973, Tran = -1, EID = 3
+Server status is UP.
+
+Time: 08/04/26 16:53:06.425 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 5
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select sum(s), avg(s), sum(b), avg(b) from [dba.t_claude_num]
+
+Time: 08/04/26 16:53:06.425 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 6
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.425 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 7
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select sum(s*b), avg(s*b) from [dba.t_claude_num]
+
+Time: 08/04/26 16:53:06.425 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 8
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 9
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select sum(case when  mod(i, 2)=0 then s else -s end), sum(c...
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 10
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 11
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select sum(distinct s), count(distinct s) from [dba.t_claude...
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 12
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 13
+Syntax: before '  ORDER BY 1; '
+Unknown class "dba.t_claude_num". select  mod(i, 7), sum(s), avg(b) from [dba.t_claude_num] gr...
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 14
+before '  ORDER BY 1; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 15
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select count(*), sum(cnt), sum(ssum) from ((select  mod(i, 1...
+
+Time: 08/04/26 16:53:06.426 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 16
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.427 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 17
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select sum(m), avg(m) from [dba.t_claude_num]
+
+Time: 08/04/26 16:53:06.427 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 18
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:06.545 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_sr.c, line 238  CODE = -973, Tran = 1, EID = 19
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:06.843 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/query/vacuum.c, line 1005  CODE = -1190, Tran = -1, EID = 1
+Stand-alone vacuum execution is started.
+
+Time: 08/04/26 16:53:06.850 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/query/vacuum.c, line 1098  CODE = -1191, Tran = -1, EID = 2
+Stand-alone vacuum execution is ended.
+
+Time: 08/04/26 16:53:07.878 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_sr.c, line 238  CODE = -973, Tran = -1, EID = 3
+Server status is UP.
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 5
+Syntax: before '  ORDER BY i; '
+Unknown class "dba.t_claude_num". select i,  mod(i, 3), sum(s) over (partition by  mod(i, 3)) ...
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 6
+before '  ORDER BY i; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 7
+Syntax: before '  ORDER BY i; '
+Unknown class "dba.t_claude_num". select i, sum(s) over (order by i) from [dba.t_claude_num] w...
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 8
+before '  ORDER BY i; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 9
+Syntax: before ' ; '
+Unknown class "dba.t_claude_num". select sum(s) from [dba.t_claude_num] where i<=8
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 10
+before ' ; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 11
+Syntax: before '  ORDER BY p, i; '
+Unknown class "dba.t_claude_num". select i,  mod(i, 2), sum(b) over (partition by  mod(i, 2) o...
+
+Time: 08/04/26 16:53:07.881 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 12
+before '  ORDER BY p, i; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:07.882 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 13
+Syntax: before '  ORDER BY MOD(i,4), i; '
+Unknown class "dba.t_claude_num". select i,  mod(i, 4), sum(s) over (order by  mod(i, 4)) from...
+
+Time: 08/04/26 16:53:07.882 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 14
+before '  ORDER BY MOD(i,4), i; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:07.882 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 15
+Syntax: before '  ORDER BY v DESC; '
+Unknown class "dba.t5". select v, sum(v) over (order by v desc ) from [dba.t5] order...
+
+Time: 08/04/26 16:53:07.882 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 16
+before '  ORDER BY v DESC; '
+Unknown class "dba.t5".
+
+Time: 08/04/26 16:53:07.882 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 17
+Syntax: before ' ; '
+Unknown class "dba.t5". select sum(v) from [dba.t5]
+
+Time: 08/04/26 16:53:07.882 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 18
+before ' ; '
+Unknown class "dba.t5".
+
+Time: 08/04/26 16:53:07.883 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 19
+Syntax: before '  ORDER BY i; '
+Unknown class "dba.t_claude_num". select i, sum(case when  mod(i, 3)=0 then null when  mod(i, ...
+
+Time: 08/04/26 16:53:07.883 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 20
+before '  ORDER BY i; '
+Unknown class "dba.t_claude_num".
+
+Time: 08/04/26 16:53:07.960 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_sr.c, line 238  CODE = -973, Tran = 1, EID = 21
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.059 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574957) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.111 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.111 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.127 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574960) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.132 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, count(...
+
+Time: 08/04/26 16:53:21.132 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.148 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574964) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.154 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.154 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.170 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574968) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.176 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.176 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.190 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574972) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.196 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, count(...
+
+Time: 08/04/26 16:53:21.196 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.212 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574976) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.217 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.218 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.233 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574980) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.239 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.239 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.252 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574984) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.258 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, count(...
+
+Time: 08/04/26 16:53:21.258 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.273 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574988) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.279 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.279 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:21.294 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3574992) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:21.300 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:21.300 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.422 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575503) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.428 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.428 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.442 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575506) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.447 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, count(...
+
+Time: 08/04/26 16:53:34.447 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.460 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575510) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.466 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.466 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.479 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575514) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.485 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.485 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.499 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575518) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.504 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, count(...
+
+Time: 08/04/26 16:53:34.504 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.517 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575522) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.523 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.523 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.536 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575526) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.542 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.542 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.556 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575530) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.562 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, count(...
+
+Time: 08/04/26 16:53:34.562 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.575 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575534) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.580 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.580 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before '  ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:34.595 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_cl.c, line 875  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 3575538) connected to database server 'demodb' on the host 'localhost' (port 1523).
+
+Time: 08/04/26 16:53:34.601 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/parser/query_result.c, line 371 ERROR CODE = -493, Tran = 1, EID = 2
+Syntax: before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem". select /*+ PARALLEL(6) */ l_returnflag, l_linestatus, sum(l_...
+
+Time: 08/04/26 16:53:34.601 - SYNTAX ERROR *** file /home/cubrid/github/cubrid/src/compat/db_vdb.c, line 1093 ERROR CODE = -492, Tran = 1, EID = 3
+before ' 
+ORDER BY l_returnflag, l_linestatus; '
+Unknown class "dba.t_lineitem".
+
+*** The previous error message is the last one. ***
+
