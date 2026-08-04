@@ -145,6 +145,34 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
   db_make_null (&dbval);
   db_make_null (&sqr_val);
 
+  /* POC: a SUM/AVG whose word accumulator is already running only reads its
+   * operand, so peek it instead of deep-copying a DB_VALUE per row (the
+   * aggregate path does the same).  The first value of a partition, a
+   * reinstated partial, a NULL and any non-NUMERIC value keep the general path
+   * below, which fetches its own copy and clears it on the way out. */
+  if (qdata_analytic_numeric_sum_acc_enabled () && (func_p->function == PT_SUM || func_p->function == PT_AVG)
+      && func_p->curr_cnt >= 1 && func_p->num_sum_acc.is_active && func_p->opr_dbtype != DB_TYPE_VARIABLE
+      && TP_DOMAIN_COLLATION_FLAG (func_p->domain) == TP_DOMAIN_COLL_NORMAL)
+    {
+      DB_VALUE *peek_operand_p = NULL;
+
+      if (fetch_peek_dbval (thread_p, &func_p->operand, val_desc_p, NULL, NULL, NULL, &peek_operand_p) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+
+      if (!DB_IS_NULL (peek_operand_p) && DB_VALUE_DOMAIN_TYPE (peek_operand_p) == DB_TYPE_NUMERIC)
+	{
+	  if (numeric_sum_acc_add_value (&func_p->num_sum_acc, peek_operand_p) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  func_p->curr_cnt++;
+	  return NO_ERROR;
+	}
+    }
+
   /* fetch operand value, analytic regulator variable should only contain constants */
   if (fetch_copy_dbval (thread_p, &func_p->operand, val_desc_p, NULL, NULL, NULL, &dbval) != NO_ERROR)
     {
