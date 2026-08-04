@@ -70,11 +70,11 @@ PG(동일 장비, 병렬 6워커) **10.3s** → 격차 as-is 3.0x → **to-be 1.
 NUMERIC 연산자는 **소유 구간이 나뉘어 있다.** 이 POC는 그중 **집계 구간만** 확장하고
 나머지는 손대지 않는다 — 어느 함수군이 무엇을 담당하는지 알고 나면 §4의 변경 내역이 읽힌다.
 
-| 구간 | 담당 함수군 | 이 POC와의 관계 |
-|---|---|---|
-| 단순·특수 (serial 등) | `numeric_db_value_*` | 그대로 — 워드 변환이 오히려 오버헤드다 |
-| **일반 이항 연산** | `float_numeric_db_value_*` | **손대지 않음** — CBRD-27150이 최적화한 구간 |
-| **집계·분석 누적** | 누계산(`numeric_sum_acc_*`) + 집계 내부식 혼합(`numeric_poc_chain_*`) | **이 POC가 신설·확장** |
+| 구간 | 담당 함수군 | 이 POC와의 관계 | 예시 |
+|---|---|---|---|
+| 단순·특수 (serial 등) | `numeric_db_value_*` | 그대로 — 워드 변환이 오히려 오버헤드다 | SELECT s.NEXT_VALUE |
+| **일반 이항 연산** | `float_numeric_db_value_*` | **손대지 않음** — CBRD-27150이 최적화한 구간 | SELECT col1 + 3 |
+| **집계·분석 누적** | 누계산(`numeric_sum_acc_*`) + 집계 내부식 혼합(`numeric_poc_chain_*`) | **이 POC가 신설·확장** | SELECT SUM(col1), AVG(col1), SUM(col1 * col2) |
 
 **경계를 어떻게 지키는가** — 구분은 실행 시점에 결정된다. 집계 인자로만 소비되는 출력 수식을
 쿼리 시작 시 1회 표시해 두고(`REGU_VARIABLE_AGG_OPERAND`), **표시된 것만** 혼합한다.
@@ -186,6 +186,28 @@ owner_p = qdata_agg_node_at (agg_list, shared_from - 1);      /* 사용: −1 */
 집계는 그룹이 끝날 때 한 번만 값을 내지만, 누적 분석 함수(`SUM(x) OVER (ORDER BY ...)`)는
 **행마다 그때까지의 합**을 내보내고 계속 쌓아야 한다. 그래서 누산기를 끝내는 `finalize`와 별도로,
 누산기를 그대로 남긴 채 값만 뽑는 `snapshot`을 두었다.
+
+#### 서버 모드 결함 수정 (성능 아님 — 기능 복구)
+
+**증상**: CS 모드(`csql -u dba <db>`)에서 NUMERIC 집계가 `Query execution failure #NNNNN`으로 실패했다.
+게이트 on/off 모두, 직렬·병렬 모두. SA 모드에서는 정상이었다.
+
+**원인**: 서버 모드는 클라이언트가 XASL을 **직렬화해 서버로 보내고**, 서버가
+`stx_build_aggregate_type ()`으로 다시 만든다. 그런데 `stx_alloc_struct ()`는 `db_private_alloc`만
+하고 **memset을 하지 않는다.** 스트림에 실려오지 않는 실행 전용 필드(`shared_from`, `num_sum_acc`)는
+그 메모리에 있던 값을 그대로 갖게 되고, 쓰레기 인덱스로 owner를 찾지 못한 전파 코드가
+**`er_set` 없이** `ER_FAILED`를 반환했다 — 그래서 에러 메시지가 저렇게 무의미했다.
+
+**수정 세 가지** (`30305dcff`):
+
+| | 내용 |
+|---|---|
+| 스트림 복원 지점 초기화 | `clear_value_at_clone_decache = false` 옆에서 `shared_from = 0`, `num_sum_acc.is_active = false`를 명시 |
+| 전파를 게이트 안으로 | 게이트 off에서는 아무것도 링크되지 않으므로 전파 자체를 건너뛴다 (§9 함정 5의 재발이었다) |
+| 실패에 에러 설정 | owner를 못 찾으면 `ER_QPROC_INVALID_XASLNODE` — 다음에는 진단이 가능하도록 |
+
+**왜 여태 못 봤나**: SA 모드는 XASL을 메모리로 공유해 스트림 경로를 아예 타지 않는다.
+POC 전체를 SA로만 측정·검증했기 때문에 드러나지 않았다. 자세한 경위는 §9 함정 7.
 
 #### 기각: 해시 델타 스킵 (`5bec86046` 되돌림)
 
