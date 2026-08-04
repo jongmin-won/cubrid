@@ -68,7 +68,6 @@ static int fetch_peek_min_max_value_of_width_bucket_func (THREAD_ENTRY * thread_
 							  val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl,
 							  DB_VALUE ** min, DB_VALUE ** max);
 
-static bool fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget);
 static bool fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
 				  QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out);
 
@@ -94,7 +93,7 @@ static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VAL
  * max_recursion_sql_depth is left to the legacy path -- which raises
  * ER_MAX_RECURSION_SQL_DEPTH for it, as it would without the chain.
  */
-static bool
+bool
 fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
 {
   const ARITH_TYPE *arithptr;
@@ -211,7 +210,9 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
    *
    * This is deliberately limited to expressions feeding an aggregate
    * (REGU_VARIABLE_AGG_OPERAND, set once per query by
-   * qexec_mark_aggregate_operand_expressions ()). General binary arithmetic stays
+   * qexec_mark_aggregate_operand_expressions (), which also settles the tree
+   * shape then -- the shape cannot change between rows, so it is not re-checked
+   * here). General binary arithmetic stays
    * with float_numeric_db_value_* so that each numeric operator keeps a single
    * owner: numeric_db_value_* for the simple cases, float_numeric_db_value_* for
    * general arithmetic, and the word accumulator plus this chain for aggregation.
@@ -224,11 +225,7 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
    * A NULL result domain is left to the general path, which returns without
    * touching the result in that case. */
   if (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_AGG_OPERAND)
-      && (arithptr->opcode == T_ADD || arithptr->opcode == T_SUB || arithptr->opcode == T_MUL)
-      && numeric_poc_gate_enabled ()
-      && !(regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NULL)
-      && fetch_poc_chain_shape_ok (regu_var, (prm_get_integer_value (PRM_ID_MAX_RECURSION_SQL_DEPTH)
-					      - thread_get_recursion_depth (thread_p))))
+      && !(regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NULL))
     {
       NUMERIC_POC_CHAIN_VAL chain_val;
 

@@ -21232,8 +21232,10 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
   AGGREGATE_TYPE *agg_list, *agg_p;
   VALPTR_LIST *outptr_list;
 
-  if (xasl == NULL || xasl->type != BUILDLIST_PROC)
+  if (xasl == NULL || xasl->type != BUILDLIST_PROC || !qexec_numeric_poc_enabled ())
     {
+      /* the gate is settled at load time, so testing it once here keeps it off
+       * the row path entirely */
       return;
     }
 
@@ -21256,7 +21258,13 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
 	  if (agg_p->operands != NULL && agg_p->operands->value.type == TYPE_CONSTANT
 	      && agg_p->operands->value.value.dbvalptr == regu_p->value.vfetch_to)
 	    {
-	      REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
+	      /* The tree shape is fixed for the whole query, so settle it here and
+	       * let the row path test one flag instead of walking the tree again. */
+	      if (fetch_poc_chain_shape_ok (&regu_p->value,
+					    prm_get_integer_value (PRM_ID_MAX_RECURSION_SQL_DEPTH)))
+		{
+		  REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
+		}
 	      break;
 	    }
 	}
