@@ -4791,12 +4791,8 @@ qexec_hash_gby_agg_tuple (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE 
 	  rc = qdata_evaluate_aggregate_list (thread_p, proc->g_agg_list, &xasl_state->vd, value->accumulators, false);
 	}
 
-      /* compute size; skipped when every accumulator holds only fixed-size
-       * values -- the per-tuple delta is always zero once the group exists */
-      if (!(context->fixed_hvalue_size && qexec_numeric_poc_enabled ()))
-	{
-	  context->hash_size += qdata_get_agg_hvalue_size (value, true);
-	}
+      /* compute size */
+      context->hash_size += qdata_get_agg_hvalue_size (value, true);
 
       /* check for error */
       if (rc != NO_ERROR)
@@ -27798,8 +27794,6 @@ qexec_alloc_agg_hash_context (THREAD_ENTRY * thread_p, BUILDLIST_PROC_NODE * pro
   proc->agg_hash_context->curr_part_value = NULL;
   proc->agg_hash_context->sort_key.key = NULL;
   proc->agg_hash_context->sort_key.nkeys = 0;
-  /* assume fixed-size accumulators until a variable-size one is seen below */
-  proc->agg_hash_context->fixed_hvalue_size = true;
 
   /*
    * create temporary dbvalue array
@@ -27855,16 +27849,6 @@ qexec_alloc_agg_hash_context (THREAD_ENTRY * thread_p, BUILDLIST_PROC_NODE * pro
 	{
 	  assert (agg_list);
 	  proc->agg_hash_context->accumulator_domains[i] = &agg_list->accumulator_domain;
-
-	  /* POC: a variable-size accumulator value (string/set/json) disables the
-	   * fixed-size shortcut for the per-tuple hash memory delta */
-	  if (agg_list->accumulator_domain.value_dom == NULL
-	      || pr_is_variable_type (TP_DOMAIN_TYPE (agg_list->accumulator_domain.value_dom))
-	      || (agg_list->accumulator_domain.value2_dom != NULL
-		  && pr_is_variable_type (TP_DOMAIN_TYPE (agg_list->accumulator_domain.value2_dom))))
-	    {
-	      proc->agg_hash_context->fixed_hvalue_size = false;
-	    }
 	}
     }
 

@@ -82,8 +82,6 @@ namespace cubquery
     int hash_size;		/* hash table size */
     int group_count;		/* groups processed in hash table */
     int tuple_count;		/* tuples processed in hash table */
-    bool fixed_hvalue_size;	/* POC: every accumulator holds only fixed-size values, so the
-				 * per-tuple hash memory delta is always zero and can be skipped */
 
     /* partial list file stuff */
     SCAN_CODE part_scan_code;	/* scan status of partial list file */
