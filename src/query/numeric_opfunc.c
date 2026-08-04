@@ -2581,22 +2581,9 @@ float_numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   uint64_t dbv1_word[calc_words];
   uint64_t dbv2_word[calc_words];
   uint64_t result_word[calc_words];
-  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_gate_enabled ())
-    {
-      /* the 17-byte fast path of numeric_bytes_to_words () writes every
-       * destination word, so only the result buffer needs zeroing; the
-       * VLA sizes are runtime values, so the memset calls below cannot be
-       * inlined by the compiler and cost three real calls per operation */
-      result_word[0] = 0;
-      result_word[1] = 0;
-      result_word[2] = 0;
-    }
-  else
-    {
-      memset (dbv1_word, 0, sizeof (dbv1_word));
-      memset (dbv2_word, 0, sizeof (dbv2_word));
-      memset (result_word, 0, sizeof (result_word));
-    }
+  memset (dbv1_word, 0, sizeof (dbv1_word));
+  memset (dbv2_word, 0, sizeof (dbv2_word));
+  memset (result_word, 0, sizeof (result_word));
 
   numeric_bytes_to_words (db_locate_numeric (dbv1), DB_NUMERIC_BUF_SIZE, dbv1_word, calc_words, calc_nbytes);
   numeric_bytes_to_words (db_locate_numeric (dbv2), DB_NUMERIC_BUF_SIZE, dbv2_word, calc_words, calc_nbytes);
@@ -2870,22 +2857,9 @@ float_numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   uint64_t dbv1_word[calc_words];
   uint64_t dbv2_word[calc_words];
   uint64_t result_word[calc_words];
-  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_gate_enabled ())
-    {
-      /* the 17-byte fast path of numeric_bytes_to_words () writes every
-       * destination word, so only the result buffer needs zeroing; the
-       * VLA sizes are runtime values, so the memset calls below cannot be
-       * inlined by the compiler and cost three real calls per operation */
-      result_word[0] = 0;
-      result_word[1] = 0;
-      result_word[2] = 0;
-    }
-  else
-    {
-      memset (dbv1_word, 0, sizeof (dbv1_word));
-      memset (dbv2_word, 0, sizeof (dbv2_word));
-      memset (result_word, 0, sizeof (result_word));
-    }
+  memset (dbv1_word, 0, sizeof (dbv1_word));
+  memset (dbv2_word, 0, sizeof (dbv2_word));
+  memset (result_word, 0, sizeof (result_word));
 
   numeric_bytes_to_words (db_locate_numeric (dbv1), DB_NUMERIC_BUF_SIZE, dbv1_word, calc_words, calc_nbytes);
   numeric_bytes_to_words (db_locate_numeric (dbv2), DB_NUMERIC_BUF_SIZE, dbv2_word, calc_words, calc_nbytes);
@@ -3119,22 +3093,9 @@ float_numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   uint64_t dbv1_word[calc_words];
   uint64_t dbv2_word[calc_words];
   uint64_t result_word[calc_words];
-  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_gate_enabled ())
-    {
-      /* the 17-byte fast path of numeric_bytes_to_words () writes every
-       * destination word, so only the result buffer needs zeroing; the
-       * VLA sizes are runtime values, so the memset calls below cannot be
-       * inlined by the compiler and cost three real calls per operation */
-      result_word[0] = 0;
-      result_word[1] = 0;
-      result_word[2] = 0;
-    }
-  else
-    {
-      memset (dbv1_word, 0, sizeof (dbv1_word));
-      memset (dbv2_word, 0, sizeof (dbv2_word));
-      memset (result_word, 0, sizeof (result_word));
-    }
+  memset (dbv1_word, 0, sizeof (dbv1_word));
+  memset (dbv2_word, 0, sizeof (dbv2_word));
+  memset (result_word, 0, sizeof (result_word));
 
   numeric_bytes_to_words (db_locate_numeric (dbv1), DB_NUMERIC_BUF_SIZE, dbv1_word, calc_words, calc_nbytes);
   numeric_bytes_to_words (db_locate_numeric (dbv2), DB_NUMERIC_BUF_SIZE, dbv2_word, calc_words, calc_nbytes);
