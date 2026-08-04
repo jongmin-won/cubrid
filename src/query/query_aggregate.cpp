@@ -139,6 +139,209 @@ qdata_numeric_sum_acc_enabled (void)
   return enabled == 1;
 }
 
+/* POC B2: word-domain evaluation of NUMERIC-only {+,-,x} aggregate operand trees.
+ * A chain value carries the coefficient magnitude in 128 bits together with its
+ * decimal scale, sign and an upper bound of its decimal digits. The bound never
+ * exceeds 38, which guarantees (a) the coefficient fits uint128 and (b) the
+ * legacy per-operation path would not have rounded either, so results stay
+ * bit-identical. Anything else (division, other types, NULL, wider values)
+ * falls back to the legacy DB_VALUE path. */
+struct qdata_poc_chain_val
+{
+  uint128_t coeff;		/* coefficient magnitude, < 10^38 */
+  int scale;			/* decimal scale */
+  int bound;			/* upper bound of decimal digits of coeff */
+  bool neg;			/* sign */
+};
+
+/* powers of ten up to 10^38; file-scope constructor runs during static init */
+struct qdata_poc_pow10_table
+{
+  uint128_t p[39];
+  qdata_poc_pow10_table ()
+  {
+    uint128_t v = 1;
+    for (int i = 0; i < 39; i++)
+      {
+	p[i] = v;
+	v *= 10;
+      }
+  }
+};
+static const qdata_poc_pow10_table qdata_poc_pow10;
+
+/* exact decimal digit count of a coefficient below 10^38 (bit-length estimate
+ * refined against the pow10 table -- same scheme as float_numeric_get_decimal_digit) */
+static int
+qdata_poc_digits_u128 (uint128_t coeff)
+{
+  uint64_t hi = (uint64_t) (coeff >> 64);
+  int bits = (hi != 0) ? (128 - __builtin_clzll (hi)) : (64 - __builtin_clzll ((uint64_t) coeff | 1));
+  int digits = ((bits - 1) * 1233 >> 12) + 1;
+
+  while (digits <= 38 && coeff >= qdata_poc_pow10.p[digits])
+    {
+      digits++;
+    }
+
+  return digits;
+}
+
+static bool
+qdata_poc_leaf_to_chain (const DB_VALUE * dv, qdata_poc_chain_val * out)
+{
+  if (dv == NULL || DB_IS_NULL (dv))
+    {
+      return false;
+    }
+
+  switch (DB_VALUE_DOMAIN_TYPE (dv))
+    {
+    case DB_TYPE_NUMERIC:
+      if (!numeric_poc_dbv_to_u128 (dv, &out->coeff, &out->scale, &out->neg, &out->bound))
+	{
+	  return false;
+	}
+      /* the header precision of a fixed column overstates the stored value
+       * (e.g. NUMERIC(38,4) holding 7 digits); bound from the actual digits
+       * so realistic chains stay under the 38-digit fusion guard */
+      out->bound = qdata_poc_digits_u128 (out->coeff);
+      return true;
+
+    case DB_TYPE_INTEGER:
+      {
+	INT64 v = db_get_int (dv);
+
+	out->neg = (v < 0);
+	out->coeff = (uint128_t) (uint64_t) (v < 0 ? -v : v);
+	out->scale = 0;
+	out->bound = qdata_poc_digits_u128 (out->coeff);
+	return true;
+      }
+
+    case DB_TYPE_SHORT:
+      {
+	INT64 v = db_get_short (dv);
+
+	out->neg = (v < 0);
+	out->coeff = (uint128_t) (uint64_t) (v < 0 ? -v : v);
+	out->scale = 0;
+	out->bound = qdata_poc_digits_u128 (out->coeff);
+	return true;
+      }
+
+    case DB_TYPE_BIGINT:
+      {
+	INT64 v = db_get_bigint (dv);
+
+	out->neg = (v < 0);
+	/* the unsigned negation also covers INT64_MIN */
+	out->coeff = (uint128_t) (v < 0 ? -(UINT64) v : (UINT64) v);
+	out->scale = 0;
+	out->bound = qdata_poc_digits_u128 (out->coeff);
+	return true;
+      }
+
+    default:
+      return false;
+    }
+}
+
+static bool
+qdata_poc_eval_word_chain (const REGU_VARIABLE * regu, qdata_poc_chain_val * out)
+{
+  ARITH_TYPE *arith;
+  qdata_poc_chain_val l, r;
+
+  switch (regu->type)
+    {
+    case TYPE_CONSTANT:
+      return qdata_poc_leaf_to_chain (regu->value.dbvalptr, out);
+    case TYPE_DBVAL:
+      return qdata_poc_leaf_to_chain (&regu->value.dbval, out);
+    case TYPE_INARITH:
+      break;
+    default:
+      return false;
+    }
+
+  arith = regu->value.arithptr;
+  if (arith == NULL || arith->leftptr == NULL || arith->rightptr == NULL
+      || (arith->opcode != T_ADD && arith->opcode != T_SUB && arith->opcode != T_MUL))
+    {
+      return false;
+    }
+
+  if (!qdata_poc_eval_word_chain (arith->leftptr, &l) || !qdata_poc_eval_word_chain (arith->rightptr, &r))
+    {
+      return false;
+    }
+
+  if (arith->opcode == T_MUL)
+    {
+      /* coefficients multiply, scales add; no alignment needed */
+      out->bound = l.bound + r.bound;
+      out->scale = l.scale + r.scale;
+      if (out->bound > 38 || out->scale > DB_MAX_NUMERIC_SCALE)
+	{
+	  return false;
+	}
+      out->coeff = l.coeff * r.coeff;
+      out->neg = (l.neg != r.neg) && out->coeff != 0;
+      return true;
+    }
+
+  /* T_ADD / T_SUB: subtraction is an addition with the right sign flipped */
+  if (arith->opcode == T_SUB)
+    {
+      r.neg = !r.neg;
+    }
+
+  if (l.scale != r.scale)
+    {
+      qdata_poc_chain_val *lo = (l.scale < r.scale) ? &l : &r;
+      int diff = (l.scale < r.scale) ? (r.scale - l.scale) : (l.scale - r.scale);
+
+      if (lo->bound + diff > 38)
+	{
+	  return false;
+	}
+      lo->coeff *= qdata_poc_pow10.p[diff];
+      lo->bound += diff;
+      lo->scale += diff;
+    }
+
+  out->scale = l.scale;
+  out->bound = ((l.bound > r.bound) ? l.bound : r.bound) + 1;
+  if (out->bound > 38)
+    {
+      return false;
+    }
+
+  if (l.neg == r.neg)
+    {
+      out->coeff = l.coeff + r.coeff;
+      out->neg = l.neg;
+    }
+  else if (l.coeff >= r.coeff)
+    {
+      out->coeff = l.coeff - r.coeff;
+      out->neg = l.neg;
+    }
+  else
+    {
+      out->coeff = r.coeff - l.coeff;
+      out->neg = r.neg;
+    }
+
+  if (out->coeff == 0)
+    {
+      out->neg = false;
+    }
+
+  return true;
+}
+
 /*
  * qdata_initialize_aggregate_list () -
  *   return: NO_ERROR, or ER_code
@@ -742,6 +945,29 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	    }
 
 	  continue;
+	}
+
+      /* POC B2: NUMERIC-only {+,-,x} operand expressions evaluate entirely in the
+       * word domain and feed the live accumulator directly -- no DB_VALUE round
+       * trips between operations. Division and any unsupported shape fall back
+       * to the legacy path below (see qdata_poc_eval_word_chain) */
+      if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
+	  && agg_p->operands != NULL && agg_p->operands->next == NULL && agg_p->option != Q_DISTINCT
+	  && agg_p->sort_list == NULL && !agg_p->flag.min_max_optimized
+	  && accumulator->num_sum_acc.is_active && agg_p->operands->value.type == TYPE_INARITH)
+	{
+	  qdata_poc_chain_val cv;
+
+	  if (qdata_poc_eval_word_chain (&agg_p->operands->value, &cv))
+	    {
+	      if (numeric_sum_acc_add_u128 (&accumulator->num_sum_acc, cv.coeff, cv.scale, cv.neg) != NO_ERROR)
+		{
+		  return ER_FAILED;
+		}
+
+	      accumulator->curr_cnt++;
+	      continue;
+	    }
 	}
 
       /* POC fast path: a single-operand SUM/AVG consumes the operand immediately

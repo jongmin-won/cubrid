@@ -301,6 +301,8 @@ static inline void numeric_put_uint64_to_be (void *ptr, uint64_t val);
 static void numeric_bytes_to_words (const uint8_t * src, int src_bytes, uint64_t * dest, int dest_words,
 				    int dest_bytes);
 static void numeric_words_to_bytes (const uint64_t * src, int src_words, uint8_t * dest);
+static int numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_scale,
+				     bool val_neg);
 
 /*
  * numeric_is_negative () -
@@ -4168,11 +4170,8 @@ int
 numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 {
   uint64_t val_words[NUMERIC_SUM_ACC_WORDS];	/* staging; only the words actually used are ever written */
-  const uint64_t *val_p;
-  int val_win, val_prec, val_scale, val_used;
+  int val_prec, val_scale, val_used;
   bool val_neg;
-  int win, top, i, p, new_used, w;
-  unsigned char carry;
 
   assert (acc != NULL && dbv != NULL);
   assert (DB_VALUE_DOMAIN_TYPE (dbv) == DB_TYPE_NUMERIC);
@@ -4209,6 +4208,28 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   assert (val_used >= 1 && val_used <= NUMERIC_AS_WORDS);
   assert (val_used >= 1 + (int) ((val_words[NUMERIC_SUM_ACC_WORDS - 3] | val_words[NUMERIC_SUM_ACC_WORDS - 2]) != 0)
 	  + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 3] != 0));
+
+  return numeric_sum_acc_add_core (acc, val_words, val_used, val_scale, val_neg);
+}
+
+/*
+ * numeric_sum_acc_add_core () - accumulate a coefficient staged in the tail of
+ *                               a full-width word buffer into an active accumulator
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
+ *   acc(in/out)   : active word accumulator
+ *   val_words(in) : full-width staging buffer; the low NUMERIC_AS_WORDS words hold
+ *                   the coefficient, upper words are written only by this function
+ *   val_used(in)  : active word count of the staged coefficient
+ *   val_scale(in) : scale of the staged value
+ *   val_neg(in)   : sign of the staged value
+ */
+static int
+numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_scale, bool val_neg)
+{
+  const uint64_t *val_p;
+  int val_win, win, top, i, p, new_used, w;
+  unsigned char carry;
+
   val_p = &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS];
   val_win = NUMERIC_AS_WORDS;
 
@@ -4318,6 +4339,76 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
     }
 
   return NO_ERROR;
+}
+
+/*
+ * numeric_sum_acc_add_u128 () - accumulate a 128-bit coefficient produced by the
+ *                               fused word-domain expression chain (B2)
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
+ *   acc(in/out)      : word accumulator; activated by the first value
+ *   coeff(in)        : coefficient magnitude (< 10^38, guaranteed by the chain guard)
+ *   scale(in)        : decimal scale of the value
+ *   is_negative(in)  : sign of the value
+ */
+int
+numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative)
+{
+  uint64_t val_words[NUMERIC_SUM_ACC_WORDS];
+  int val_used;
+
+  assert (acc != NULL);
+
+  val_words[NUMERIC_SUM_ACC_WORDS - 3] = 0;
+  val_words[NUMERIC_SUM_ACC_WORDS - 2] = (uint64_t) (coeff >> 64);
+  val_words[NUMERIC_SUM_ACC_WORDS - 1] = (uint64_t) coeff;
+  val_used = 1 + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 2] != 0);
+
+  if (!acc->is_active)
+    {
+      memset (acc->words, 0, sizeof (acc->words));
+      acc->words[NUMERIC_SUM_ACC_WORDS - 2] = val_words[NUMERIC_SUM_ACC_WORDS - 2];
+      acc->words[NUMERIC_SUM_ACC_WORDS - 1] = val_words[NUMERIC_SUM_ACC_WORDS - 1];
+      acc->scale = scale;
+      acc->is_negative = (is_negative && coeff != 0);
+      acc->used_words = val_used;
+      acc->is_active = true;
+      return NO_ERROR;
+    }
+
+  return numeric_sum_acc_add_core (acc, val_words, val_used, scale, is_negative);
+}
+
+/*
+ * numeric_poc_dbv_to_u128 () - unpack a NUMERIC DB_VALUE whose coefficient fits
+ *                              128 bits (precision <= 38) for the word chain
+ *   return: true on success, false when the value is unusable (NULL, non-NUMERIC,
+ *           or precision above 38)
+ */
+bool
+numeric_poc_dbv_to_u128 (const DB_VALUE * dbv, uint128_t * coeff, int *scale, bool * is_negative, int *digit_bound)
+{
+  uint64_t w[NUMERIC_AS_WORDS];
+  int prec, dbv_scale;
+
+  if (dbv == NULL || DB_VALUE_DOMAIN_TYPE (dbv) != DB_TYPE_NUMERIC || DB_IS_NULL (dbv))
+    {
+      return false;
+    }
+
+  db_get_numeric_precision_and_scale (dbv, &prec, &dbv_scale, NULL);
+  if (prec < 1 || prec > 38)
+    {
+      return false;
+    }
+
+  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE, w, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES);
+  assert (w[0] == 0);		/* precision <= 38 fits the low two words */
+
+  *coeff = ((uint128_t) w[1] << 64) | w[2];
+  *scale = dbv_scale;
+  *is_negative = numeric_is_negative (dbv);
+  *digit_bound = prec;
+  return true;
 }
 
 /*
