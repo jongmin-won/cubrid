@@ -15940,6 +15940,12 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	  /* domains not resolved */
 	  xasl->proc.buildlist.g_agg_domains_resolved = 0;
 
+	  /* Flag the output expressions that exist only to feed an aggregate, so
+	   * that the word chain can pick them up. Done here, before any scan
+	   * starts and before parallel workers are spawned, so that the serial
+	   * path and every worker -- which inherits the regu flags -- agree. */
+	  qexec_mark_aggregate_operand_expressions (xasl);
+
 	  if (xasl->proc.buildlist.a_eval_list)
 	    {
 	      if (qdata_setup_analytic_eval_list (thread_p, xasl, xasl_state) != NO_ERROR)
@@ -21201,6 +21207,59 @@ qexec_resolve_domains_for_aggregation (THREAD_ENTRY * thread_p, AGGREGATE_TYPE *
 
   /* all ok */
   return NO_ERROR;
+}
+
+/*
+ * qexec_mark_aggregate_operand_expressions () - flag output expressions that only
+ *                                               feed an aggregate
+ *   xasl(in/out): BUILDLIST_PROC whose output expressions are marked
+ *
+ * A hash aggregation evaluates its operand expressions while building the output
+ * tuple descriptor, and the aggregate nodes then read the result through a
+ * TYPE_CONSTANT operand pointing at the very DB_VALUE the expression wrote
+ * (regu->vfetch_to). Matching those two pointers identifies the expressions that
+ * exist solely to feed an aggregate.
+ *
+ * The flag keeps the word chain -- which belongs to the aggregate path -- from
+ * reaching general expressions: those stay with the float_numeric_db_value_*
+ * operators. Called once per query, right after the aggregate domains resolve.
+ */
+void
+qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
+{
+  REGU_VARIABLE_LIST regu_p;
+  AGGREGATE_TYPE *agg_list, *agg_p;
+  VALPTR_LIST *outptr_list;
+
+  if (xasl == NULL || xasl->type != BUILDLIST_PROC)
+    {
+      return;
+    }
+
+  agg_list = xasl->proc.buildlist.g_agg_list;
+  outptr_list = xasl->outptr_list;
+  if (agg_list == NULL || outptr_list == NULL)
+    {
+      return;
+    }
+
+  for (regu_p = outptr_list->valptrp; regu_p != NULL; regu_p = regu_p->next)
+    {
+      if (regu_p->value.type != TYPE_INARITH || regu_p->value.vfetch_to == NULL)
+	{
+	  continue;
+	}
+
+      for (agg_p = agg_list; agg_p != NULL; agg_p = agg_p->next)
+	{
+	  if (agg_p->operands != NULL && agg_p->operands->value.type == TYPE_CONSTANT
+	      && agg_p->operands->value.value.dbvalptr == regu_p->value.vfetch_to)
+	    {
+	      REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
+	      break;
+	    }
+	}
+    }
 }
 
 /*

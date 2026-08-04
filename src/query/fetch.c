@@ -41,6 +41,7 @@
 #include "object_primitive.h"
 #include "object_representation.h"
 #include "arithmetic.h"
+#include "numeric_opfunc.h"
 #include "serial.h"
 #include "session.h"
 #include "string_opfunc.h"
@@ -67,10 +68,111 @@ static int fetch_peek_min_max_value_of_width_bucket_func (THREAD_ENTRY * thread_
 							  val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl,
 							  DB_VALUE ** min, DB_VALUE ** max);
 
+static bool fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget);
+static bool fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+				  QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out);
+
 static bool is_argument_wrapped_with_cast_op (const REGU_VARIABLE * regu_var);
 static int get_hour_minute_or_second (const DB_VALUE * datetime, OPERATOR_TYPE op_type, DB_VALUE * db_value);
 static int get_year_month_or_day (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
 static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
+
+/*
+ * fetch_poc_chain_shape_ok () - can this expression tree be fused in the word domain?
+ *   return: true if it is a {+,-,x} tree over plain value references
+ *   regu_var(in): root of the expression tree
+ *   budget(in): remaining recursion allowance
+ *
+ * The shape is checked before any operand is read, so that a tree which only
+ * turns out to be unfusable later (a value too wide, say) can be re-evaluated by
+ * the legacy path without any operand being evaluated twice. Only leaves that
+ * are plain value references qualify, which is what makes that re-evaluation
+ * free of side effects: operators such as T_INCR never reach the chain.
+ *
+ * The chain descends on its own without touching the recursion counter that
+ * fetch_peek_arith () maintains, so a tree deep enough to exhaust
+ * max_recursion_sql_depth is left to the legacy path -- which raises
+ * ER_MAX_RECURSION_SQL_DEPTH for it, as it would without the chain.
+ */
+static bool
+fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
+{
+  const ARITH_TYPE *arithptr;
+
+  if (budget <= 0)
+    {
+      return false;
+    }
+
+  switch (regu_var->type)
+    {
+    case TYPE_CONSTANT:
+    case TYPE_DBVAL:
+    case TYPE_POSITION:
+    case TYPE_ATTR_ID:
+      return true;
+
+    case TYPE_INARITH:
+      break;
+
+    default:
+      return false;
+    }
+
+  arithptr = regu_var->value.arithptr;
+  if (arithptr == NULL || arithptr->leftptr == NULL || arithptr->rightptr == NULL
+      || (arithptr->opcode != T_ADD && arithptr->opcode != T_SUB && arithptr->opcode != T_MUL))
+    {
+      return false;
+    }
+
+  return (fetch_poc_chain_shape_ok (arithptr->leftptr, budget - 1)
+	  && fetch_poc_chain_shape_ok (arithptr->rightptr, budget - 1));
+}
+
+/*
+ * fetch_poc_eval_chain () - evaluate a {+,-,x} tree entirely in the word domain
+ *   return: true when the whole tree was fused, false to fall back
+ *   out(out): fused result
+ *
+ * Every operand must be a NUMERIC that fits a chain. Mixing in an integer would
+ * route the legacy path through numeric_db_value_* instead of
+ * float_numeric_db_value_*, which derives precision differently, so such trees
+ * fall back rather than risk a different precision or scale.
+ */
+static bool
+fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+		      QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out)
+{
+  ARITH_TYPE *arithptr;
+  NUMERIC_POC_CHAIN_VAL left, right;
+
+  if (regu_var->type != TYPE_INARITH)
+    {
+      DB_VALUE *peek_leaf = NULL;
+
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, obj_oid, tpl, &peek_leaf) != NO_ERROR)
+	{
+	  return false;
+	}
+
+      return numeric_poc_chain_from_dbv (peek_leaf, out);
+    }
+
+  arithptr = regu_var->value.arithptr;
+  if (!fetch_poc_eval_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_poc_eval_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+    {
+      return false;
+    }
+
+  if (arithptr->opcode == T_MUL)
+    {
+      return numeric_poc_chain_mul (&left, &right, out);
+    }
+
+  return numeric_poc_chain_add (&left, &right, arithptr->opcode == T_SUB, out);
+}
 
 /*
  * fetch_peek_arith () -
@@ -101,6 +203,43 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
     }
 
   assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
+
+  /* POC: an aggregate operand expression is evaluated as one word-domain chain.
+   * The general path materializes a DB_VALUE per operation -- packing the
+   * coefficient and re-deriving precision every time -- where the chain carries
+   * the running coefficient in 128 bits and packs a single result here.
+   *
+   * This is deliberately limited to expressions feeding an aggregate
+   * (REGU_VARIABLE_AGG_OPERAND, set once per query by
+   * qexec_mark_aggregate_operand_expressions ()). General binary arithmetic stays
+   * with float_numeric_db_value_* so that each numeric operator keeps a single
+   * owner: numeric_db_value_* for the simple cases, float_numeric_db_value_* for
+   * general arithmetic, and the word accumulator plus this chain for aggregation.
+   *
+   * The chain writes its one result where the general path would have written it,
+   * so every consumer is unaffected: the tuple descriptor, the aggregate operand
+   * that references it, and the group's first_tuple, which a spilling hash
+   * aggregation later replays through the sort path.
+   *
+   * A NULL result domain is left to the general path, which returns without
+   * touching the result in that case. */
+  if (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_AGG_OPERAND)
+      && (arithptr->opcode == T_ADD || arithptr->opcode == T_SUB || arithptr->opcode == T_MUL)
+      && numeric_poc_gate_enabled ()
+      && !(regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NULL)
+      && fetch_poc_chain_shape_ok (regu_var, (prm_get_integer_value (PRM_ID_MAX_RECURSION_SQL_DEPTH)
+					      - thread_get_recursion_depth (thread_p))))
+    {
+      NUMERIC_POC_CHAIN_VAL chain_val;
+
+      if (fetch_poc_eval_chain (thread_p, regu_var, vd, obj_oid, tpl, &chain_val))
+	{
+	  numeric_poc_chain_to_dbv (&chain_val, arithptr->value);
+	  *peek_dbval = arithptr->value;
+
+	  return NO_ERROR;
+	}
+    }
 
   peek_left = NULL;
   peek_right = NULL;

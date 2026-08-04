@@ -835,6 +835,11 @@ namespace parallel_scan
 			m_interrupt_p->set_code (parallel_query::interrupt::interrupt_code::ERROR_INTERRUPTED_FROM_WORKER_THREAD);
 			return false;
 		      }
+
+		    /* A worker evaluates the output expressions on its own XASL, so the
+		     * aggregate operand marking of the serial path does not reach it.
+		     * Mark them here, once per worker, exactly like the domains above. */
+		    qexec_mark_aggregate_operand_expressions (tl.xasl);
 		  }
 		if (qexec_hash_gby_agg_tuple_public (thread_p, tl.xasl, tl.vd->xasl_state, &tl.tpl_buf,
 						     & (tl.writer_result_p->tpl_descr), tl.writer_result_p, &output_tuple) != NO_ERROR)
