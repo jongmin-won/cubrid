@@ -230,6 +230,31 @@ NUMERIC 연산자는 소유 구간이 나뉘어 있고, 이 POC는 **집계 구�
 | `SUM(s)` 7자리 | 0.373s | 0.253s | −32% |
 | `SUM/AVG OVER` (분석) | — | — | −8~9% |
 
+### to-be 프로파일 — 어디에 남았나 (CS 모드 Q1, 5회 중앙값)
+
+`~wall`은 워커 CPU를 6워커 계수(5.76)로 나눈 값이다. **CPU 4% 미만은 병렬 wall 노이즈(±1.5s)에
+묻혀 검증할 수 없다**는 점을 함께 읽어야 한다.
+
+| 성격 | 대표 심볼 | median | ~wall | 범위 |
+|---|---|---|---|---|
+| 스캔·deform | `heap_attrinfo_read_dbvalues` | 10.4% | 1.55s | **POC 밖** |
+| 집계 프레임 순회 | `qdata_evaluate_aggregate_list` | 6.2% | 0.92s | **POC 밖** (집계 8개 × 5,800만 행) |
+| **집계 내부식 혼합** | `fetch_poc_eval_chain` | 5.1% | 0.76s | 우리 코드 |
+| 튜플 기술자 생성 | `qdata_generate_tuple_desc_for_valptr_list` | 4.8% | 0.71s | **POC 밖** |
+| 해시 집계 | `qexec_hash_gby_agg_tuple` | 4.7% | 0.70s | **POC 밖** |
+| fetch + NUMERIC 읽기 | `fetch_val_list`, `mr_data_readval_numeric` | 8.0% | 1.19s | **POC 밖** |
+| **누계산·체인 나머지** | `numeric_sum_acc_add_core`, `numeric_poc_chain_*` | 9.4% | 1.40s | 우리 코드 |
+| DB_VALUE 관리 | `pr_clear_value`, `db_value_domain_init`, `pr_type_from_id` | 5.8% | 0.86s | **POC 밖** |
+| ~~해시 메모리 회계~~ | `pr_value_mem_size`, `qdata_get_agg_hvalue_size` | 4.3% | — | **기각** (§3) |
+| **TLS 접근** | `__tls_init`, `__tls_get_addr` | 2.9% | 0.43s | **POC 밖** — 아래 |
+
+**읽는 법**: 우리 코드가 총 **14.5%**이고 이것은 최적화를 마친 뒤의 실제 산술 작업이다.
+**4%를 넘는 나머지 항목은 전부 POC 범위 밖**이므로, NUMERIC 집계 쪽에서 더 짜낼 것은 없다.
+
+**부수 발견 — TLS 2.9%**: 병렬 워커가 `tl.xasl`·`tl.vd` 같은 thread_local을 행마다 접근하면서
+동적 TLS 조회(`__tls_get_addr`)가 반복된다. 함수 진입에서 한 번 지역 변수로 받으면 없앨 수 있지만,
+병렬 전용이라 직렬로는 재현되지 않고 병렬 wall로는 0.43s가 노이즈에 묻힌다 → 별도 이슈 후보.
+
 ## 5. 정확성
 
 | 검증 | 결과 |
