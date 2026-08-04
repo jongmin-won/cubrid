@@ -235,6 +235,8 @@ qdata_initialize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_
     {
 
       agg_p->is_ended = false;
+      /* accumulator sharing is decided once the accumulator domains are known */
+      agg_p->accumulator.shared_from = 0;
       /* the value of groupby_num() remains unchanged; it will be changed while evaluating groupby_num predicates
        * against each group at 'xs_eval_grbynum_pred()' */
       if (agg_p->function == PT_GROUPBY_NUM)
@@ -754,6 +756,72 @@ qdata_aggregate_multiple_values_to_accumulator (cubthread::entry *thread_p, cubx
 }
 
 /*
+ * qdata_agg_may_share_accumulator () - can this aggregate take part in accumulator sharing?
+ *   return: true for a plain SUM/AVG over a single referenced value
+ */
+static bool
+qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
+{
+  return ((agg_p->function == PT_SUM || agg_p->function == PT_AVG)
+	  && agg_p->option != Q_DISTINCT && agg_p->sort_list == NULL && !agg_p->flag.agg_optimized
+	  && !agg_p->flag.min_max_optimized && agg_p->operands != NULL && agg_p->operands->next == NULL
+	  && agg_p->operands->value.type == TYPE_CONSTANT && agg_p->operands->value.value.dbvalptr != NULL
+	  && agg_p->accumulator_domain.value_dom != NULL);
+}
+
+/*
+ * qdata_link_shared_accumulators () - let SUM and AVG over the same argument
+ *                                     share one accumulator
+ *   agg_list(in/out): aggregate list of the query
+ *
+ * SUM(x) and AVG(x) accumulate the identical sum, so accumulating twice per row
+ * is pure duplication -- PostgreSQL avoids it by giving both aggregates the same
+ * transition function and sharing the transition state
+ * (find_compatible_pertrans(); sum(numeric) and avg(numeric) both use
+ * numeric_avg_accum).  Here the later aggregate records the index of the earlier
+ * one and stops accumulating; when the accumulator is materialized, it copies
+ * the result from that owner.
+ *
+ * Two aggregates share only if their argument is literally the same DB_VALUE,
+ * both are a plain SUM or AVG, and they accumulate into the same domain -- an
+ * integer SUM accumulates as an integer while its AVG may not.  Must run after
+ * the accumulator domains are resolved, and is called once per query on the
+ * serial path and once per worker on the parallel path.
+ */
+void
+qdata_link_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
+{
+  cubxasl::aggregate_list_node *agg_p, *owner_p;
+  int index, owner_index;
+
+  if (!qdata_numeric_sum_acc_enabled ())
+    {
+      return;
+    }
+
+  for (agg_p = agg_list, index = 0; agg_p != NULL; agg_p = agg_p->next, index++)
+    {
+      agg_p->accumulator.shared_from = 0;
+
+      if (!qdata_agg_may_share_accumulator (agg_p))
+	{
+	  continue;
+	}
+
+      for (owner_p = agg_list, owner_index = 0; owner_p != agg_p; owner_p = owner_p->next, owner_index++)
+	{
+	  if (owner_p->accumulator.shared_from == 0 && qdata_agg_may_share_accumulator (owner_p)
+	      && owner_p->operands->value.value.dbvalptr == agg_p->operands->value.value.dbvalptr
+	      && owner_p->accumulator_domain.value_dom == agg_p->accumulator_domain.value_dom)
+	    {
+	      agg_p->accumulator.shared_from = owner_index + 1;
+	      break;
+	    }
+	}
+    }
+}
+
+/*
  * qdata_evaluate_aggregate_list () -
  *   return: NO_ERROR, or ER_code
  *   agg_list(in): aggregate expression node list
@@ -789,6 +857,13 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 
       if (agg_p->flag.agg_optimized || agg_p->is_ended)
 	{
+	  continue;
+	}
+
+      if (accumulator->shared_from > 0)
+	{
+	  /* an earlier aggregate accumulates this same sum; the result is copied
+	   * from it when the accumulator is materialized */
 	  continue;
 	}
 
@@ -1491,6 +1566,70 @@ cleanup:
 }
 
 /*
+ * qdata_agg_node_at () - nth node of an aggregate list
+ *   return: the node, or NULL if the list is shorter
+ */
+static cubxasl::aggregate_list_node *
+qdata_agg_node_at (cubxasl::aggregate_list_node *agg_list, int index)
+{
+  while (agg_list != NULL && index > 0)
+    {
+      agg_list = agg_list->next;
+      index--;
+    }
+
+  return agg_list;
+}
+
+/*
+ * qdata_propagate_shared_accumulators () - hand the accumulated sum to the
+ *                                          aggregates that shared it
+ *   return: NO_ERROR, or ER_code
+ *   agg_list(in/out): aggregate list of the query
+ *
+ * Must run before any accumulator is materialized: materializing turns an AVG's
+ * value into the average, and a SUM sharing that accumulator needs the sum.  So
+ * each sharing aggregate takes its own copy of the accumulator state here and
+ * materializes it independently afterwards.  Copying is a plain struct
+ * assignment, once per group.
+ */
+static int
+qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
+{
+  cubxasl::aggregate_list_node *agg_p, *owner_p;
+
+  for (agg_p = agg_list; agg_p != NULL; agg_p = agg_p->next)
+    {
+      if (agg_p->accumulator.shared_from <= 0)
+	{
+	  continue;
+	}
+
+      owner_p = qdata_agg_node_at (agg_list, agg_p->accumulator.shared_from - 1);
+      if (owner_p == NULL)
+	{
+	  assert (false);
+	  return ER_FAILED;
+	}
+
+      agg_p->accumulator.curr_cnt = owner_p->accumulator.curr_cnt;
+      agg_p->accumulator.num_sum_acc = owner_p->accumulator.num_sum_acc;
+      if (!owner_p->accumulator.num_sum_acc.is_active)
+	{
+	  /* the owner never reached the word accumulator (a non-NUMERIC value, or a
+	   * fallback); its running value carries the sum instead */
+	  pr_clear_value (agg_p->accumulator.value);
+	  if (pr_clone_value (owner_p->accumulator.value, agg_p->accumulator.value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+    }
+
+  return NO_ERROR;
+}
+
+/*
  * qdata_finalize_aggregate_list () -
  *   return: NO_ERROR, or ER_code
  *   agg_list(in)       : Aggregate expression node list
@@ -1518,6 +1657,12 @@ qdata_finalize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
   const PR_TYPE *pr_type_p;
   OR_BUF buf;
   double dbl;
+
+  error = qdata_propagate_shared_accumulators (agg_list_p);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
 
   db_make_null (&sqr_val);
   db_make_null (&dbval);
@@ -2356,10 +2501,14 @@ qdata_alloc_agg_hvalue (cubthread::entry *thread_p, int func_cnt, cubxasl::aggre
       value->accumulators[i].value = pr_make_value ();
       value->accumulators[i].value2 = pr_make_value ();
       value->accumulators[i].num_sum_acc.is_active = false;
+      value->accumulators[i].shared_from = 0;
     }
   /* initialize accumulators.value */
   for (i = 0, agg_p = g_agg_list; agg_p != NULL; agg_p = agg_p->next, i++)
     {
+      /* accumulator sharing was decided per query; each group's array inherits it */
+      value->accumulators[i].shared_from = agg_p->accumulator.shared_from;
+
       /* CAUTION : if modify initializing ACC's value then should change qdata_initialize_aggregate_list() */
       if (agg_p->function == PT_GROUPBY_NUM)
 	{
@@ -2663,8 +2812,11 @@ qdata_load_agg_hvalue_in_agg_list (aggregate_hash_value *value, cubxasl::aggrega
 
       if (agg_list->function != PT_GROUPBY_NUM)
 	{
-	  /* POC: the word accumulator state travels with the accumulator (plain data) */
+	  /* POC: the word accumulator state travels with the accumulator (plain data),
+	   * and so does the sharing link -- the list finalized per group is not the one
+	   * the sharing was computed on, and the hash value's array joins the two */
 	  agg_list->accumulator.num_sum_acc = value->accumulators[i].num_sum_acc;
+	  agg_list->accumulator.shared_from = value->accumulators[i].shared_from;
 
 	  if (copy_vals)
 	    {
@@ -2735,6 +2887,30 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
     {
       list_id->tpl_descr.f_valp[col++] = key->values[i];
       tuple_size += qdata_get_tuple_value_size_from_dbval (key->values[i]);
+    }
+
+  /* POC: hand the accumulated sum to the aggregates that shared it, before any of
+   * them is materialized -- materializing an AVG turns its value into the average,
+   * which a SUM sharing the same accumulation must not inherit. */
+  for (i = 0; i < value->func_count; i++)
+    {
+      int owner = value->accumulators[i].shared_from - 1;
+
+      if (owner < 0 || owner >= value->func_count)
+	{
+	  continue;
+	}
+
+      value->accumulators[i].curr_cnt = value->accumulators[owner].curr_cnt;
+      value->accumulators[i].num_sum_acc = value->accumulators[owner].num_sum_acc;
+      if (!value->accumulators[owner].num_sum_acc.is_active)
+	{
+	  pr_clear_value (value->accumulators[i].value);
+	  if (pr_clone_value (value->accumulators[owner].value, value->accumulators[i].value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
     }
 
   for (i = 0; i < value->func_count; i++)

@@ -15945,6 +15945,7 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	   * starts and before parallel workers are spawned, so that the serial
 	   * path and every worker -- which inherits the regu flags -- agree. */
 	  qexec_mark_aggregate_operand_expressions (xasl);
+	  qdata_link_shared_accumulators (xasl->proc.buildlist.g_agg_list);
 
 	  if (xasl->proc.buildlist.a_eval_list)
 	    {

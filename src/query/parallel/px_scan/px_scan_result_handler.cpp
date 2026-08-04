@@ -840,6 +840,7 @@ namespace parallel_scan
 		     * aggregate operand marking of the serial path does not reach it.
 		     * Mark them here, once per worker, exactly like the domains above. */
 		    qexec_mark_aggregate_operand_expressions (tl.xasl);
+		    qdata_link_shared_accumulators (tl.xasl->proc.buildlist.g_agg_list);
 		  }
 		if (qexec_hash_gby_agg_tuple_public (thread_p, tl.xasl, tl.vd->xasl_state, &tl.tpl_buf,
 						     & (tl.writer_result_p->tpl_descr), tl.writer_result_p, &output_tuple) != NO_ERROR)
