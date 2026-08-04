@@ -43,6 +43,7 @@
 | ~~분석 격차의 perf 분해~~ | `pg_vs_cubrid.md` §2-c. **격차는 전부 스캔·deform**이고 정렬·분석함수·NUMERIC 누적은 상위에 없다 | **완료 — POC 범위 밖 확정** |
 | 분석 함수에 내부식 혼합 확장 | 수식 추가 비용이 CUBRID +0.25s(PG +0.46s) — 이미 PG보다 싸다. 확장 효과 0.1s 수준 | 값 없음 |
 | 튜플 크기 계산 캐시 | `qdata_get_tuple_value_size_from_dbval` 2.2% + `mr_data_lengthval_numeric` 1.0%. **집계·분석·일반 SELECT 공통 경로** | CPU 3.2% = **병렬 wall 측정 불가**. 해시 델타 스킵과 같은 함정 — 아래 참조 |
+| ~~작업 버퍼 zero-fill 스킵~~ | `float_numeric_db_value_*`의 memset 3회 생략 | **기각·되돌림**. 일반 이항 연산 구간 침범 + 곱셈 2회 추가비용 0.204→0.210s로 효과 측정 불가 (결과 문서 §4) |
 | ~~해시 델타 스킵~~ | 행마다 해시 메모리 증감 재계산 생략 | **기각·되돌림**. NUMERIC이 `pr_is_variable_type`=true라 처음부터 미발동. 조건을 바꾸면 스필 회계가 부정확해진다 (`poc_numeric_sum_acc_results.md` §4) |
 
 **CPU 4% 미만 항목의 교훈**: 병렬 Q1의 측정 노이즈는 ±1.5s인데 CPU 4%는 wall 0.6s다. 즉 **이 규모의
