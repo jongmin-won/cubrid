@@ -13,7 +13,9 @@
 | **서버 모드 결함 수정** (스트림 XASL의 accumulator 초기화) | `30305dcff` |
 | 수식 트리 shape 판정을 쿼리당 1회로 | `dc15a8d0e` |
 | 분석 함수 인자 peek | `c5e9fa031` |
-| 문서 재작성 (목적·구간별 차이·변경 내역·측정) | — |
+| 분석 격차 perf 분해 (전부 스캔·deform으로 확정) | `16e34c6f9` |
+| **해시 델타 스킵 기각·되돌림** (처음부터 미발동) | `623ebfe6e` |
+| 문서 재작성 (요약 표 + 항목별 상세, 목적·구간별 차이·측정) | — |
 
 **서버 모드 Q1 병렬 6워커 (8G): as-is 33.1s → to-be 14.2s (−57%)**
 (SA 모드: 32.9 → 15.0s. 서버 모드가 실사용 형태이며 이쪽이 기준이다)
@@ -40,7 +42,12 @@
 | ~~분석 함수의 인자 peek~~ | 커밋 `c5e9fa031` | **완료** |
 | ~~분석 격차의 perf 분해~~ | `pg_vs_cubrid.md` §2-c. **격차는 전부 스캔·deform**이고 정렬·분석함수·NUMERIC 누적은 상위에 없다 | **완료 — POC 범위 밖 확정** |
 | 분석 함수에 내부식 혼합 확장 | 수식 추가 비용이 CUBRID +0.25s(PG +0.46s) — 이미 PG보다 싸다. 확장 효과 0.1s 수준 | 값 없음 |
-| 튜플 크기 계산 캐시 | `pr_value_mem_size`+`get_tuple_value_size`+`lengthval_numeric` = 워커 CPU 3.4s. **집계·분석·일반 SELECT 공통 경로**(`qexec_generate_tuple_descriptor`) | wall 0.6s — 작다 |
+| 튜플 크기 계산 캐시 | `qdata_get_tuple_value_size_from_dbval` 2.2% + `mr_data_lengthval_numeric` 1.0%. **집계·분석·일반 SELECT 공통 경로** | CPU 3.2% = **병렬 wall 측정 불가**. 해시 델타 스킵과 같은 함정 — 아래 참조 |
+| ~~해시 델타 스킵~~ | 행마다 해시 메모리 증감 재계산 생략 | **기각·되돌림**. NUMERIC이 `pr_is_variable_type`=true라 처음부터 미발동. 조건을 바꾸면 스필 회계가 부정확해진다 (`poc_numeric_sum_acc_results.md` §3) |
+
+**CPU 4% 미만 항목의 교훈**: 병렬 Q1의 측정 노이즈는 ±1.5s인데 CPU 4%는 wall 0.6s다. 즉 **이 규모의
+개선은 병렬 wall로 검증 자체가 불가능**하다. 하려면 직렬로 재서 CPU 절감을 1:1로 확인하고, 그 값을
+근거로 채택 여부를 정해야 한다. 검증할 수 없는 개선을 "효과 있음"으로 계상하면 안 된다.
 
 **wall/CPU 환산 주의**: 워커 CPU 87.5s ÷ wall 15.2s = 5.76배(6워커). **CPU 1s 절감 = wall 약 0.17s.**
 프로파일의 CPU 초를 wall 개선으로 착각하지 말 것. PG와의 남은 격차 4.6s를 메우려면 CPU 27s가
