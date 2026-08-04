@@ -1598,6 +1598,14 @@ qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
 {
   cubxasl::aggregate_list_node *agg_p, *owner_p;
 
+  if (!qdata_numeric_sum_acc_enabled ())
+    {
+      /* nothing links accumulators while the gate is off, and an accumulator that
+       * never went through qdata_link_shared_accumulators () carries no index to
+       * trust here */
+      return NO_ERROR;
+    }
+
   for (agg_p = agg_list; agg_p != NULL; agg_p = agg_p->next)
     {
       if (agg_p->accumulator.shared_from <= 0)
@@ -1609,6 +1617,7 @@ qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
       if (owner_p == NULL)
 	{
 	  assert (false);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
 	  return ER_FAILED;
 	}
 
