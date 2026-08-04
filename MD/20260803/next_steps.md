@@ -23,7 +23,7 @@
 ## ⚠ 이날 가장 값비싼 발견
 
 **POC 전체가 SA 모드(`csql -S`)로만 검증되어 있었고, 서버 모드에서는 집계가 실패했다.**
-원인·수정은 `poc_numeric_sum_acc_results.md` §8의 함정 7번. 앞으로 측정·검증은 **서버 모드로** 한다.
+원인·수정은 `poc_numeric_sum_acc_results.md` §9의 함정 7번. 앞으로 측정·검증은 **서버 모드로** 한다.
 `build.sh install`이 실행 트리를 갱신하지 않는 함정도 같은 절에 기록했다 — 검증 전 바이너리
 타임스탬프를 반드시 확인할 것.
 
@@ -43,7 +43,7 @@
 | ~~분석 격차의 perf 분해~~ | `pg_vs_cubrid.md` §2-c. **격차는 전부 스캔·deform**이고 정렬·분석함수·NUMERIC 누적은 상위에 없다 | **완료 — POC 범위 밖 확정** |
 | 분석 함수에 내부식 혼합 확장 | 수식 추가 비용이 CUBRID +0.25s(PG +0.46s) — 이미 PG보다 싸다. 확장 효과 0.1s 수준 | 값 없음 |
 | 튜플 크기 계산 캐시 | `qdata_get_tuple_value_size_from_dbval` 2.2% + `mr_data_lengthval_numeric` 1.0%. **집계·분석·일반 SELECT 공통 경로** | CPU 3.2% = **병렬 wall 측정 불가**. 해시 델타 스킵과 같은 함정 — 아래 참조 |
-| ~~해시 델타 스킵~~ | 행마다 해시 메모리 증감 재계산 생략 | **기각·되돌림**. NUMERIC이 `pr_is_variable_type`=true라 처음부터 미발동. 조건을 바꾸면 스필 회계가 부정확해진다 (`poc_numeric_sum_acc_results.md` §3) |
+| ~~해시 델타 스킵~~ | 행마다 해시 메모리 증감 재계산 생략 | **기각·되돌림**. NUMERIC이 `pr_is_variable_type`=true라 처음부터 미발동. 조건을 바꾸면 스필 회계가 부정확해진다 (`poc_numeric_sum_acc_results.md` §4) |
 
 **CPU 4% 미만 항목의 교훈**: 병렬 Q1의 측정 노이즈는 ±1.5s인데 CPU 4%는 wall 0.6s다. 즉 **이 규모의
 개선은 병렬 wall로 검증 자체가 불가능**하다. 하려면 직렬로 재서 CPU 절감을 1:1로 확인하고, 그 값을
@@ -70,10 +70,10 @@
 - 실측으로 기각된 것은 되돌리고 사유·재도전 조건을 문서에 남긴다
 - 매 단계 비트 동일성 + `t5 = …118700` 검증
 - **나눗셈은 워드 체인에서 영구 제외** — 결과 scale 정책이 답을 정의하는 연산
-- 집계 코드를 건드릴 때는 `poc_numeric_sum_acc_results.md` §8의 **7개** 점검 항목을 먼저 확인
+- 집계 코드를 건드릴 때는 `poc_numeric_sum_acc_results.md` §9의 **7개** 점검 항목을 먼저 확인
 - 검증은 release 빌드
 - **측정·검증은 서버 모드**(`csql -u dba <db>`)로 한다. `csql -S`(SA)는 XASL 스트림 경로를 타지 않는다
-- **빌드 후 `$CUBRID/bin/cub_server` 타임스탬프로 반영을 확인**한 뒤 측정한다(§8 참조)
+- **빌드 후 `$CUBRID/bin/cub_server` 타임스탬프로 반영을 확인**한 뒤 측정한다(§9 참조)
 
 ## 측정 환경
 
