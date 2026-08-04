@@ -38,7 +38,7 @@
 | 후보 | 근거 | 판단 |
 |---|---|---|
 | ~~분석 함수의 인자 peek~~ | 커밋 `c5e9fa031` | **완료** |
-| **분석 격차의 perf 분해** | 분석은 PG 대비 **1.65~2.0x**로 집계(1.44x)보다 격차가 크다. 정렬·리스트파일이라는 판단은 두 쿼리 차분에서 나온 추론일 뿐 프로파일 근거가 없다 | **해야 함** |
+| ~~분석 격차의 perf 분해~~ | `pg_vs_cubrid.md` §2-c. **격차는 전부 스캔·deform**이고 정렬·분석함수·NUMERIC 누적은 상위에 없다 | **완료 — POC 범위 밖 확정** |
 | 분석 함수에 내부식 혼합 확장 | 수식 추가 비용이 CUBRID +0.25s(PG +0.46s) — 이미 PG보다 싸다. 확장 효과 0.1s 수준 | 값 없음 |
 | 튜플 크기 계산 캐시 | `pr_value_mem_size`+`get_tuple_value_size`+`lengthval_numeric` = 워커 CPU 3.4s. **집계·분석·일반 SELECT 공통 경로**(`qexec_generate_tuple_descriptor`) | wall 0.6s — 작다 |
 
