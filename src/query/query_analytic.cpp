@@ -48,15 +48,8 @@ static int qdata_analytic_interpolation (cubthread::entry *thread_p, cubxasl::an
 static bool
 qdata_analytic_numeric_sum_acc_enabled (void)
 {
-  static int enabled = -1;
-
-  if (enabled < 0)
-    {
-      const char *env = getenv ("CUBRID_NUMSUM_ACC");
-      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
-    }
-
-  return enabled == 1;
+  /* resolved once at library load; see numeric_init_poc_gate () */
+  return numeric_poc_gate_enabled ();
 }
 
 /*

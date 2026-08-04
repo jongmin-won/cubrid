@@ -205,6 +205,7 @@ struct numeric_sum_acc
   bool is_active;		/* false until the first value is accumulated */
 };
 
+extern bool numeric_poc_gate_enabled (void);
 extern int numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
 extern int numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative);
 extern int numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result);

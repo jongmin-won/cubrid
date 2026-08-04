@@ -128,15 +128,8 @@ qdata_process_distinct_or_sort (cubthread::entry *thread_p, cubxasl::aggregate_l
 static bool
 qdata_numeric_sum_acc_enabled (void)
 {
-  static int enabled = -1;
-
-  if (enabled < 0)
-    {
-      const char *env = getenv ("CUBRID_NUMSUM_ACC");
-      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
-    }
-
-  return enabled == 1;
+  /* resolved once at library load; see numeric_init_poc_gate () */
+  return numeric_poc_gate_enabled ();
 }
 
 /* POC B2: word-domain evaluation of NUMERIC-only {+,-,x} aggregate operand trees.
@@ -154,21 +147,22 @@ struct qdata_poc_chain_val
   bool neg;			/* sign */
 };
 
-/* powers of ten up to 10^38; file-scope constructor runs during static init */
-struct qdata_poc_pow10_table
+/* powers of ten up to 10^38 for the word chain (u128 -- the engine's u64
+ * lookup stops at 10^19); filled at load time like the other numeric LUTs,
+ * so multi-threaded servers never race on a lazily built table */
+static uint128_t qdata_poc_pow10_u128[39];
+
+__attribute__ ((constructor))
+     static void qdata_poc_init_pow10_u128 (void)
 {
-  uint128_t p[39];
-  qdata_poc_pow10_table ()
-  {
-    uint128_t v = 1;
-    for (int i = 0; i < 39; i++)
-      {
-	p[i] = v;
-	v *= 10;
-      }
-  }
-};
-static const qdata_poc_pow10_table qdata_poc_pow10;
+  uint128_t v = 1;
+
+  for (int i = 0; i < 39; i++)
+    {
+      qdata_poc_pow10_u128[i] = v;
+      v *= 10;
+    }
+}
 
 /* exact decimal digit count of a coefficient below 10^38 (bit-length estimate
  * refined against the pow10 table -- same scheme as float_numeric_get_decimal_digit) */
@@ -179,7 +173,7 @@ qdata_poc_digits_u128 (uint128_t coeff)
   int bits = (hi != 0) ? (128 - __builtin_clzll (hi)) : (64 - __builtin_clzll ((uint64_t) coeff | 1));
   int digits = ((bits - 1) * 1233 >> 12) + 1;
 
-  while (digits <= 38 && coeff >= qdata_poc_pow10.p[digits])
+  while (digits <= 38 && coeff >= qdata_poc_pow10_u128[digits])
     {
       digits++;
     }
@@ -306,7 +300,7 @@ qdata_poc_eval_word_chain (const REGU_VARIABLE * regu, qdata_poc_chain_val * out
 	{
 	  return false;
 	}
-      lo->coeff *= qdata_poc_pow10.p[diff];
+      lo->coeff *= qdata_poc_pow10_u128[diff];
       lo->bound += diff;
       lo->scale += diff;
     }

@@ -2464,26 +2464,30 @@ exit_on_error:
   return (ret == NO_ERROR && (ret = er_errid ()) == NO_ERROR) ? ER_FAILED : ret;
 }
 
+/* POC gate state; resolved once at load time (see the constructor below) so
+ * that multi-threaded servers never race on a lazily initialized flag */
+static int _gv_numeric_poc_enabled = 0;
+
 /*
- * numeric_poc_fastpath_enabled () - POC gate shared with the aggregate word
- *                                   accumulator (CUBRID_NUMSUM_ACC=1)
- *
- * Note: gates the operator-entry micro optimizations so that the ungated
- *       binary keeps the exact legacy code path for A/B measurement.
+ * numeric_init_poc_gate () - resolve the POC gate (CUBRID_NUMSUM_ACC=1) at load time
  */
-static inline bool
-numeric_poc_fastpath_enabled (void)
+__attribute__ ((constructor))
+     static void numeric_init_poc_gate (void)
 {
-  static int enabled = -1;
+  const char *env = getenv ("CUBRID_NUMSUM_ACC");
 
-  if (enabled < 0)
-    {
-      const char *env = getenv ("CUBRID_NUMSUM_ACC");
+  _gv_numeric_poc_enabled = (env != NULL && env[0] == '1') ? 1 : 0;
+}
 
-      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
-    }
-
-  return enabled == 1;
+/*
+ * numeric_poc_gate_enabled () - POC gate shared by the word accumulator, the
+ *                               operator-entry micro optimizations and the
+ *                               word-chain fusion (single binary A/B toggle)
+ */
+bool
+numeric_poc_gate_enabled (void)
+{
+  return _gv_numeric_poc_enabled == 1;
 }
 
 /*
@@ -2551,7 +2555,7 @@ float_numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   uint64_t dbv1_word[calc_words];
   uint64_t dbv2_word[calc_words];
   uint64_t result_word[calc_words];
-  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_fastpath_enabled ())
+  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_gate_enabled ())
     {
       /* the 17-byte fast path of numeric_bytes_to_words () writes every
        * destination word, so only the result buffer needs zeroing; the
@@ -2840,7 +2844,7 @@ float_numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   uint64_t dbv1_word[calc_words];
   uint64_t dbv2_word[calc_words];
   uint64_t result_word[calc_words];
-  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_fastpath_enabled ())
+  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_gate_enabled ())
     {
       /* the 17-byte fast path of numeric_bytes_to_words () writes every
        * destination word, so only the result buffer needs zeroing; the
@@ -3089,7 +3093,7 @@ float_numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   uint64_t dbv1_word[calc_words];
   uint64_t dbv2_word[calc_words];
   uint64_t result_word[calc_words];
-  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_fastpath_enabled ())
+  if (calc_words == NUMERIC_AS_WORDS && numeric_poc_gate_enabled ())
     {
       /* the 17-byte fast path of numeric_bytes_to_words () writes every
        * destination word, so only the result buffer needs zeroing; the

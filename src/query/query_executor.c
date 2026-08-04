@@ -4613,17 +4613,8 @@ exit_on_error:
 static int
 qexec_numeric_poc_enabled (void)
 {
-  /* POC gate shared with the aggregate word accumulator (CUBRID_NUMSUM_ACC=1) */
-  static int enabled = -1;
-
-  if (enabled < 0)
-    {
-      const char *env = getenv ("CUBRID_NUMSUM_ACC");
-
-      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
-    }
-
-  return enabled == 1;
+  /* POC gate; resolved once at library load, see numeric_init_poc_gate () */
+  return numeric_poc_gate_enabled ();
 }
 
 int
