@@ -205,11 +205,50 @@ struct numeric_sum_acc
   bool is_active;		/* false until the first value is accumulated */
 };
 
+/*
+ * NUMERIC_POC_CHAIN_VAL: carrier for a {+,-,x} expression tree evaluated entirely
+ * in the word domain.
+ *
+ * The legacy operators materialize one DB_VALUE per operation, each time packing
+ * the coefficient back into its 17-byte form and re-deriving precision. A chain
+ * keeps the running coefficient in 128 bits instead and packs once, at the end.
+ *
+ * Bit-identity with the operation-by-operation path rests on the two -- and only
+ * two -- places where float_numeric_db_value_add/sub/mul can round:
+ *
+ *   1. a result of more than DB_MAX_NUMERIC_PRECISION (40) digits, where
+ *      float_numeric_check_overflow_and_adjust_scale () trims the scale and
+ *      float_numeric_round_and_pack () rounds. Below 41 digits round_and_pack
+ *      returns after a plain pack.
+ *   2. a product whose scale exceeds DB_MAX_NUMERIC_SCALE (252), which is
+ *      rescaled with rounding.
+ *
+ * A coefficient that fits uint128 spans at most 39 digits, so case 1 cannot
+ * arise while a chain holds. Every chain operation therefore only has to reject
+ * a uint128 overflow and a scale above DB_MAX_NUMERIC_SCALE -- no intermediate
+ * digit counting is needed, and the digit count is derived once when the chain
+ * is finally packed. A division, a non-NUMERIC operand, or either rejection
+ * falls back to the legacy path.
+ */
+typedef struct numeric_poc_chain_val NUMERIC_POC_CHAIN_VAL;
+struct numeric_poc_chain_val
+{
+  uint128_t coeff;		/* coefficient magnitude; fits uint128 by construction */
+  int scale;			/* decimal scale, <= DB_MAX_NUMERIC_SCALE */
+  bool neg;			/* sign; always false when coeff is zero */
+};
+
+extern bool numeric_poc_chain_from_dbv (const DB_VALUE * dbv, NUMERIC_POC_CHAIN_VAL * out);
+extern void numeric_poc_chain_from_u128 (uint128_t coeff, int scale, bool is_negative, NUMERIC_POC_CHAIN_VAL * out);
+extern bool numeric_poc_chain_mul (const NUMERIC_POC_CHAIN_VAL * left, const NUMERIC_POC_CHAIN_VAL * right,
+				   NUMERIC_POC_CHAIN_VAL * out);
+extern bool numeric_poc_chain_add (const NUMERIC_POC_CHAIN_VAL * left, const NUMERIC_POC_CHAIN_VAL * right,
+				   bool flip_right_sign, NUMERIC_POC_CHAIN_VAL * out);
+extern void numeric_poc_chain_to_dbv (const NUMERIC_POC_CHAIN_VAL * cv, DB_VALUE * answer);
+
 extern bool numeric_poc_gate_enabled (void);
 extern int numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
 extern int numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative);
 extern int numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 extern int numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
-extern bool numeric_poc_dbv_to_u128 (const DB_VALUE * dbv, uint128_t * coeff, int *scale, bool * is_negative,
-				     int *digit_bound);
 #endif /* _NUMERIC_OPFUNC_H_ */

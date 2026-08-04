@@ -133,56 +133,11 @@ qdata_numeric_sum_acc_enabled (void)
 }
 
 /* POC B2: word-domain evaluation of NUMERIC-only {+,-,x} aggregate operand trees.
- * A chain value carries the coefficient magnitude in 128 bits together with its
- * decimal scale, sign and an upper bound of its decimal digits. The bound never
- * exceeds 38, which guarantees (a) the coefficient fits uint128 and (b) the
- * legacy per-operation path would not have rounded either, so results stay
- * bit-identical. Anything else (division, other types, NULL, wider values)
- * falls back to the legacy DB_VALUE path. */
-struct qdata_poc_chain_val
-{
-  uint128_t coeff;		/* coefficient magnitude, < 10^38 */
-  int scale;			/* decimal scale */
-  int bound;			/* upper bound of decimal digits of coeff */
-  bool neg;			/* sign */
-};
-
-/* powers of ten up to 10^38 for the word chain (u128 -- the engine's u64
- * lookup stops at 10^19); filled at load time like the other numeric LUTs,
- * so multi-threaded servers never race on a lazily built table */
-static uint128_t qdata_poc_pow10_u128[39];
-
-__attribute__ ((constructor))
-     static void qdata_poc_init_pow10_u128 (void)
-{
-  uint128_t v = 1;
-
-  for (int i = 0; i < 39; i++)
-    {
-      qdata_poc_pow10_u128[i] = v;
-      v *= 10;
-    }
-}
-
-/* exact decimal digit count of a coefficient below 10^38 (bit-length estimate
- * refined against the pow10 table -- same scheme as float_numeric_get_decimal_digit) */
-static int
-qdata_poc_digits_u128 (uint128_t coeff)
-{
-  uint64_t hi = (uint64_t) (coeff >> 64);
-  int bits = (hi != 0) ? (128 - __builtin_clzll (hi)) : (64 - __builtin_clzll ((uint64_t) coeff | 1));
-  int digits = ((bits - 1) * 1233 >> 12) + 1;
-
-  while (digits <= 38 && coeff >= qdata_poc_pow10_u128[digits])
-    {
-      digits++;
-    }
-
-  return digits;
-}
-
+ * The arithmetic lives in numeric_opfunc.c (NUMERIC_POC_CHAIN_VAL); what remains
+ * here is walking the operand tree. Division and any unsupported shape fall back
+ * to the legacy DB_VALUE path. */
 static bool
-qdata_poc_leaf_to_chain (const DB_VALUE * dv, qdata_poc_chain_val * out)
+qdata_poc_leaf_to_chain (const DB_VALUE * dv, NUMERIC_POC_CHAIN_VAL * out)
 {
   if (dv == NULL || DB_IS_NULL (dv))
     {
@@ -192,24 +147,13 @@ qdata_poc_leaf_to_chain (const DB_VALUE * dv, qdata_poc_chain_val * out)
   switch (DB_VALUE_DOMAIN_TYPE (dv))
     {
     case DB_TYPE_NUMERIC:
-      if (!numeric_poc_dbv_to_u128 (dv, &out->coeff, &out->scale, &out->neg, &out->bound))
-	{
-	  return false;
-	}
-      /* the header precision of a fixed column overstates the stored value
-       * (e.g. NUMERIC(38,4) holding 7 digits); bound from the actual digits
-       * so realistic chains stay under the 38-digit fusion guard */
-      out->bound = qdata_poc_digits_u128 (out->coeff);
-      return true;
+      return numeric_poc_chain_from_dbv (dv, out);
 
     case DB_TYPE_INTEGER:
       {
 	INT64 v = db_get_int (dv);
 
-	out->neg = (v < 0);
-	out->coeff = (uint128_t) (uint64_t) (v < 0 ? -v : v);
-	out->scale = 0;
-	out->bound = qdata_poc_digits_u128 (out->coeff);
+	numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
 	return true;
       }
 
@@ -217,10 +161,7 @@ qdata_poc_leaf_to_chain (const DB_VALUE * dv, qdata_poc_chain_val * out)
       {
 	INT64 v = db_get_short (dv);
 
-	out->neg = (v < 0);
-	out->coeff = (uint128_t) (uint64_t) (v < 0 ? -v : v);
-	out->scale = 0;
-	out->bound = qdata_poc_digits_u128 (out->coeff);
+	numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
 	return true;
       }
 
@@ -228,11 +169,8 @@ qdata_poc_leaf_to_chain (const DB_VALUE * dv, qdata_poc_chain_val * out)
       {
 	INT64 v = db_get_bigint (dv);
 
-	out->neg = (v < 0);
 	/* the unsigned negation also covers INT64_MIN */
-	out->coeff = (uint128_t) (v < 0 ? -(UINT64) v : (UINT64) v);
-	out->scale = 0;
-	out->bound = qdata_poc_digits_u128 (out->coeff);
+	numeric_poc_chain_from_u128 ((uint128_t) (v < 0 ? -(UINT64) v : (UINT64) v), 0, v < 0, out);
 	return true;
       }
 
@@ -242,10 +180,10 @@ qdata_poc_leaf_to_chain (const DB_VALUE * dv, qdata_poc_chain_val * out)
 }
 
 static bool
-qdata_poc_eval_word_chain (const REGU_VARIABLE * regu, qdata_poc_chain_val * out)
+qdata_poc_eval_word_chain (const REGU_VARIABLE * regu, NUMERIC_POC_CHAIN_VAL * out)
 {
   ARITH_TYPE *arith;
-  qdata_poc_chain_val l, r;
+  NUMERIC_POC_CHAIN_VAL left, right;
 
   switch (regu->type)
     {
@@ -266,74 +204,17 @@ qdata_poc_eval_word_chain (const REGU_VARIABLE * regu, qdata_poc_chain_val * out
       return false;
     }
 
-  if (!qdata_poc_eval_word_chain (arith->leftptr, &l) || !qdata_poc_eval_word_chain (arith->rightptr, &r))
+  if (!qdata_poc_eval_word_chain (arith->leftptr, &left) || !qdata_poc_eval_word_chain (arith->rightptr, &right))
     {
       return false;
     }
 
   if (arith->opcode == T_MUL)
     {
-      /* coefficients multiply, scales add; no alignment needed */
-      out->bound = l.bound + r.bound;
-      out->scale = l.scale + r.scale;
-      if (out->bound > 38 || out->scale > DB_MAX_NUMERIC_SCALE)
-	{
-	  return false;
-	}
-      out->coeff = l.coeff * r.coeff;
-      out->neg = (l.neg != r.neg) && out->coeff != 0;
-      return true;
+      return numeric_poc_chain_mul (&left, &right, out);
     }
 
-  /* T_ADD / T_SUB: subtraction is an addition with the right sign flipped */
-  if (arith->opcode == T_SUB)
-    {
-      r.neg = !r.neg;
-    }
-
-  if (l.scale != r.scale)
-    {
-      qdata_poc_chain_val *lo = (l.scale < r.scale) ? &l : &r;
-      int diff = (l.scale < r.scale) ? (r.scale - l.scale) : (l.scale - r.scale);
-
-      if (lo->bound + diff > 38)
-	{
-	  return false;
-	}
-      lo->coeff *= qdata_poc_pow10_u128[diff];
-      lo->bound += diff;
-      lo->scale += diff;
-    }
-
-  out->scale = l.scale;
-  out->bound = ((l.bound > r.bound) ? l.bound : r.bound) + 1;
-  if (out->bound > 38)
-    {
-      return false;
-    }
-
-  if (l.neg == r.neg)
-    {
-      out->coeff = l.coeff + r.coeff;
-      out->neg = l.neg;
-    }
-  else if (l.coeff >= r.coeff)
-    {
-      out->coeff = l.coeff - r.coeff;
-      out->neg = l.neg;
-    }
-  else
-    {
-      out->coeff = r.coeff - l.coeff;
-      out->neg = r.neg;
-    }
-
-  if (out->coeff == 0)
-    {
-      out->neg = false;
-    }
-
-  return true;
+  return numeric_poc_chain_add (&left, &right, arith->opcode == T_SUB, out);
 }
 
 /*
@@ -950,7 +831,7 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  && agg_p->sort_list == NULL && !agg_p->flag.min_max_optimized
 	  && accumulator->num_sum_acc.is_active && agg_p->operands->value.type == TYPE_INARITH)
 	{
-	  qdata_poc_chain_val cv;
+	  NUMERIC_POC_CHAIN_VAL cv;
 
 	  if (qdata_poc_eval_word_chain (&agg_p->operands->value, &cv))
 	    {

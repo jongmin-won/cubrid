@@ -119,6 +119,11 @@ static const double numeric_Pow_of_10[10] = {
 /* look-up table : containing pre-calculated 4-byte ASCII representations for numbers 0000-9999. */
 static uint32_t _gv_digits4_ascii_lut[10000];
 
+/* look-up table : powers of ten from 10^0 to 10^38, used to align chain scales.
+ * 10^38 is the largest power of ten that fits uint128 (2^128 - 1 ~ 3.4 * 10^38). */
+#define NUMERIC_POC_POW10_MAX_EXP (38)
+static uint128_t _gv_numeric_poc_pow10_u128[NUMERIC_POC_POW10_MAX_EXP + 1];
+
 /*
  * _gv_numeric_precision_to_bytes_lookup
  *
@@ -507,6 +512,27 @@ __attribute__ ((constructor))
 
       _gv_digits4_ascii_lut[i] =
 	(uint32_t) digit[0] | ((uint32_t) digit[1] << 8) | ((uint32_t) digit[2] << 16) | ((uint32_t) digit[3] << 24);
+    }
+}
+
+/*
+ * numeric_init_poc_pow10_u128 () - powers of ten up to 10^38 for the word chain
+ *   return:
+ *
+ * The engine's u64 lookup stops at 10^19, so the chain needs its own table.
+ * Filled at load time like the other numeric lookup tables, so multi-threaded
+ * servers never race on a lazily built one.
+ */
+__attribute__ ((constructor))
+     static void numeric_init_poc_pow10_u128 (void)
+{
+  uint128_t v = 1;
+  int i;
+
+  for (i = 0; i <= NUMERIC_POC_POW10_MAX_EXP; i++)
+    {
+      _gv_numeric_poc_pow10_u128[i] = v;
+      v *= 10;
     }
 }
 
@@ -4383,13 +4409,51 @@ numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, boo
 }
 
 /*
- * numeric_poc_dbv_to_u128 () - unpack a NUMERIC DB_VALUE whose coefficient fits
- *                              128 bits (precision <= 38) for the word chain
- *   return: true on success, false when the value is unusable (NULL, non-NUMERIC,
- *           or precision above 38)
+ * numeric_poc_digits_u128 () - exact decimal digit count of a uint128 coefficient
+ *   return: digit count (1 for zero)
+ *
+ * Bit-length estimate refined against the pow10 table, the same scheme
+ * float_numeric_get_decimal_digit () uses on word buffers. Only needed when a
+ * chain is packed, to fill in the result precision.
+ */
+static int
+numeric_poc_digits_u128 (uint128_t coeff)
+{
+  uint64_t hi = (uint64_t) (coeff >> 64);
+  int bits = (hi != 0) ? (128 - __builtin_clzll (hi)) : (64 - __builtin_clzll ((uint64_t) coeff | 1));
+  int digits = ((bits - 1) * 1233 >> 12) + 1;
+
+  while (digits <= NUMERIC_POC_POW10_MAX_EXP && coeff >= _gv_numeric_poc_pow10_u128[digits])
+    {
+      digits++;
+    }
+
+  return digits;
+}
+
+/*
+ * numeric_poc_chain_from_u128 () - build a chain value from a coefficient that is
+ *                                  already held in 128 bits
+ */
+void
+numeric_poc_chain_from_u128 (uint128_t coeff, int scale, bool is_negative, NUMERIC_POC_CHAIN_VAL * out)
+{
+  out->coeff = coeff;
+  out->scale = scale;
+  out->neg = (coeff != 0) ? is_negative : false;
+}
+
+/*
+ * numeric_poc_chain_from_dbv () - unpack a NUMERIC DB_VALUE into a chain value
+ *   return: true on success, false when the coefficient does not fit uint128
+ *           (or the value is NULL or not a NUMERIC)
+ *
+ * A 17-byte coefficient unpacks into three words, the highest of which carries
+ * the bits above 128. That word being zero is exactly the condition for the
+ * value to fit a chain -- no digit count needed.
  */
 bool
-numeric_poc_dbv_to_u128 (const DB_VALUE * dbv, uint128_t * coeff, int *scale, bool * is_negative, int *digit_bound)
+numeric_poc_chain_from_dbv (const DB_VALUE * dbv, NUMERIC_POC_CHAIN_VAL * out)
 {
   uint64_t w[NUMERIC_AS_WORDS];
   int prec, dbv_scale;
@@ -4399,20 +4463,142 @@ numeric_poc_dbv_to_u128 (const DB_VALUE * dbv, uint128_t * coeff, int *scale, bo
       return false;
     }
 
-  db_get_numeric_precision_and_scale (dbv, &prec, &dbv_scale, NULL);
-  if (prec < 1 || prec > 38)
+  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE, w, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES);
+  if (w[0] != 0)
     {
       return false;
     }
 
-  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE, w, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES);
-  assert (w[0] == 0);		/* precision <= 38 fits the low two words */
-
-  *coeff = ((uint128_t) w[1] << 64) | w[2];
-  *scale = dbv_scale;
-  *is_negative = numeric_is_negative (dbv);
-  *digit_bound = prec;
+  db_get_numeric_precision_and_scale (dbv, &prec, &dbv_scale, NULL);
+  numeric_poc_chain_from_u128 (((uint128_t) w[1] << 64) | w[2], dbv_scale, numeric_is_negative (dbv), out);
   return true;
+}
+
+/*
+ * numeric_poc_chain_mul () - fuse a multiplication in the word domain
+ *   return: true when the fused result is representable, false to fall back
+ *
+ * Mirrors float_numeric_db_value_mul (): coefficients multiply and scales add.
+ * A zero operand short-circuits to the (1 digit, scale 0) zero that the legacy
+ * operator returns early, so a fused chain agrees with it there too.
+ */
+bool
+numeric_poc_chain_mul (const NUMERIC_POC_CHAIN_VAL * left, const NUMERIC_POC_CHAIN_VAL * right,
+		       NUMERIC_POC_CHAIN_VAL * out)
+{
+  if (left->coeff == 0 || right->coeff == 0)
+    {
+      out->coeff = 0;
+      out->scale = 0;
+      out->neg = false;
+      return true;
+    }
+
+  out->scale = left->scale + right->scale;
+  if (out->scale > DB_MAX_NUMERIC_SCALE || out->scale < DB_MIN_NUMERIC_SCALE)
+    {
+      /* above the maximum the legacy operator rescales with rounding, and below
+       * the minimum it raises ER_IT_DATA_OVERFLOW; a scale can go that low
+       * because a result wider than 40 digits has its scale trimmed, which
+       * leaves a negative scale behind for the next operation to consume */
+      return false;
+    }
+
+  if (__builtin_mul_overflow (left->coeff, right->coeff, &out->coeff))
+    {
+      return false;
+    }
+
+  out->neg = (left->neg != right->neg);
+  return true;
+}
+
+/*
+ * numeric_poc_chain_add () - fuse an addition in the word domain
+ *   return: true when the fused result is representable, false to fall back
+ *   flip_right_sign(in): true for subtraction, which is an addition with the
+ *                        right operand negated
+ *
+ * Mirrors float_numeric_db_value_add (): the narrower scale is lifted to the
+ * wider one, then the magnitudes are added or subtracted according to sign.
+ * Only the same-sign case can overflow; subtracting magnitudes never does.
+ */
+bool
+numeric_poc_chain_add (const NUMERIC_POC_CHAIN_VAL * left, const NUMERIC_POC_CHAIN_VAL * right, bool flip_right_sign,
+		       NUMERIC_POC_CHAIN_VAL * out)
+{
+  NUMERIC_POC_CHAIN_VAL l = *left;
+  NUMERIC_POC_CHAIN_VAL r = *right;
+
+  if (flip_right_sign)
+    {
+      r.neg = !r.neg;
+    }
+
+  if (l.scale != r.scale)
+    {
+      NUMERIC_POC_CHAIN_VAL *lo = (l.scale < r.scale) ? &l : &r;
+      int diff = (l.scale < r.scale) ? (r.scale - l.scale) : (l.scale - r.scale);
+
+      if (diff > NUMERIC_POC_POW10_MAX_EXP
+	  || __builtin_mul_overflow (lo->coeff, _gv_numeric_poc_pow10_u128[diff], &lo->coeff))
+	{
+	  return false;
+	}
+      lo->scale += diff;
+    }
+
+  out->scale = l.scale;
+
+  if (l.neg == r.neg)
+    {
+      if (__builtin_add_overflow (l.coeff, r.coeff, &out->coeff))
+	{
+	  return false;
+	}
+      out->neg = l.neg;
+    }
+  else if (l.coeff >= r.coeff)
+    {
+      out->coeff = l.coeff - r.coeff;
+      out->neg = l.neg;
+    }
+  else
+    {
+      out->coeff = r.coeff - l.coeff;
+      out->neg = r.neg;
+    }
+
+  if (out->coeff == 0)
+    {
+      /* prevent -0; zero is always treated as positive */
+      out->neg = false;
+    }
+
+  return true;
+}
+
+/*
+ * numeric_poc_chain_to_dbv () - pack a chain value into a floating NUMERIC DB_VALUE
+ *
+ * The precision of a floating NUMERIC result is its actual digit count, which is
+ * what the legacy operators store as well. A chain coefficient spans at most 39
+ * digits, so neither the overflow adjustment nor the rounding step of the legacy
+ * path can trigger here.
+ */
+void
+numeric_poc_chain_to_dbv (const NUMERIC_POC_CHAIN_VAL * cv, DB_VALUE * answer)
+{
+  uint64_t w[NUMERIC_AS_WORDS];
+  uint8_t result_buf[DB_NUMERIC_BUF_SIZE];
+
+  w[0] = 0;
+  w[1] = (uint64_t) (cv->coeff >> 64);
+  w[2] = (uint64_t) cv->coeff;
+  numeric_words_to_bytes (w, NUMERIC_AS_WORDS, result_buf);
+
+  db_make_numeric (answer, result_buf, numeric_poc_digits_u128 (cv->coeff), cv->scale, DB_NUMERIC_BUF_SIZE, cv->neg,
+		   true);
 }
 
 /*
