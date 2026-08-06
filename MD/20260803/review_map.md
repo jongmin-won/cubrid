@@ -75,7 +75,7 @@
 | 863 | 누적 스킵 | `shared_from > 0`이면 이 노드는 누적하지 않는다 |
 | 904 | 집계 인자 체인 | operands가 **직접** `TYPE_INARITH`인 경우 (④와 다른 경로 — §3 주의) |
 | 927 | 인자 peek | 단일 operand SUM/AVG는 딥카피 대신 참조 |
-| 1597 | `qdata_propagate_shared_accumulators` | **materialize 전** 공유 상태 복사 |
+| 1597 | `qdata_propagate_shared_accumulators` | **값 확정(finalize) 전** 공유 상태 복사 |
 | 1650 | `qdata_finalize_aggregate_list` | 그룹 마무리 — 첫 줄이 위 전파, 그 뒤 누산기 → 값 |
 | 2513 / 2519 | `qdata_alloc_agg_hvalue` | 해시 그룹 배열 초기화 + `shared_from` 상속 |
 | 2828 | `qdata_load_agg_hvalue_in_agg_list` | 해시값 → 집계 리스트로 `shared_from` 전달 |

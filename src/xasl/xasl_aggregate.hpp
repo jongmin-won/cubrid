@@ -71,8 +71,8 @@ namespace cubxasl
     NUMERIC_SUM_ACC num_sum_acc;	/* POC: word accumulator for NUMERIC SUM/AVG */
     /* One plus the index of the preceding aggregate whose accumulation this one
      * shares, or 0 for none.  SUM and AVG over the same argument accumulate the
-     * same sum, so only the first of them accumulates; the others copy the result
-     * when it is materialized.  Counting from one keeps a zero-initialized
+     * same sum, so only the first of them accumulates; the others copy that state
+     * at finalize time.  Counting from one keeps a zero-initialized
      * accumulator -- an XASL arriving from the stream, say -- meaning "no
      * sharing".  Lives here rather than in the list node so that the hash value's
      * accumulator array can resolve it on its own. */

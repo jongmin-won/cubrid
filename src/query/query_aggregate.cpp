@@ -323,7 +323,7 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
     case PT_AGG_BIT_XOR:
     case PT_AVG:
     case PT_SUM:
-      /* POC: if the source partial lives in a word accumulator, materialize it into
+      /* POC: if the source partial lives in a word accumulator, finalize it into
        * new_acc->value first so it can be treated as an ordinary value below. */
       if (new_acc->num_sum_acc.is_active)
 	{
@@ -585,7 +585,8 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
     case PT_SUM:
       /* POC: NUMERIC values accumulate into the word accumulator; rounding and packing
        * are deferred to finalize. acc->value keeps the first value only (its domain info
-       * is still needed); readers of intermediate acc->value must materialize first. */
+       * is still needed), so anything that needs the running sum has to finalize the
+       * accumulator first rather than read acc->value. */
       if (qdata_numeric_sum_acc_enabled () && DB_VALUE_DOMAIN_TYPE (value) == DB_TYPE_NUMERIC)
 	{
 	  if (acc->curr_cnt < 1)
@@ -611,6 +612,9 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	    }
 	  break;
 	}
+      /*
+       * 여기 기존 조건 안에 NUMERIC을 넣어서 처리하는 방식으로 리팩토링 필요.
+       */
 
       if (acc->curr_cnt < 1)
 	{
@@ -779,8 +783,8 @@ qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
  * transition function and sharing the transition state
  * (find_compatible_pertrans(); sum(numeric) and avg(numeric) both use
  * numeric_avg_accum).  Here the later aggregate records the index of the earlier
- * one and stops accumulating; when the accumulator is materialized, it copies
- * the result from that owner.
+ * one and stops accumulating; at finalize time it copies the accumulated state
+ * from that owner and finishes on its own.
  *
  * Two aggregates share only if their argument is literally the same DB_VALUE,
  * both are a plain SUM or AVG, and they accumulate into the same domain -- an
@@ -862,8 +866,8 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 
       if (accumulator->shared_from > 0)
 	{
-	  /* an earlier aggregate accumulates this same sum; the result is copied
-	   * from it when the accumulator is materialized */
+	  /* an earlier aggregate accumulates this same sum; the state is copied
+	   * from it at finalize time */
 	  continue;
 	}
 
@@ -1587,11 +1591,11 @@ qdata_agg_node_at (cubxasl::aggregate_list_node *agg_list, int index)
  *   return: NO_ERROR, or ER_code
  *   agg_list(in/out): aggregate list of the query
  *
- * Must run before any accumulator is materialized: materializing turns an AVG's
- * value into the average, and a SUM sharing that accumulator needs the sum.  So
- * each sharing aggregate takes its own copy of the accumulator state here and
- * materializes it independently afterwards.  Copying is a plain struct
- * assignment, once per group.
+ * Must run before any accumulator is finalized: finalizing an AVG divides the sum
+ * by the count, so a SUM sharing that accumulator would find the average where it
+ * expected the sum.  Each sharing aggregate therefore takes its own copy of the
+ * accumulator state here, ahead of the finalize loop, and finishes independently.
+ * Copying is a plain struct assignment, once per group.
  */
 static int
 qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
@@ -1706,7 +1710,7 @@ qdata_finalize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  continue;
 	}
 
-      /* POC: materialize the word accumulator into acc->value once, before any consumer
+      /* POC: turn the word accumulator into acc->value once, before any consumer
        * (AVG's division below, domain casts) reads it. this is the single rounding point. */
       if ((agg_p->function == PT_SUM || agg_p->function == PT_AVG) && agg_p->accumulator.num_sum_acc.is_active)
 	{
@@ -2899,8 +2903,8 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
     }
 
   /* POC: hand the accumulated sum to the aggregates that shared it, before any of
-   * them is materialized -- materializing an AVG turns its value into the average,
-   * which a SUM sharing the same accumulation must not inherit. */
+   * them is finalized -- finalizing an AVG divides its value by the count, which a
+   * SUM sharing the same accumulation must not inherit. */
   for (i = 0; i < value->func_count; i++)
     {
       int owner = value->accumulators[i].shared_from - 1;
@@ -2924,7 +2928,7 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
 
   for (i = 0; i < value->func_count; i++)
     {
-      /* POC: a spilled partial is saved as an ordinary DB_VALUE; materialize the word
+      /* POC: a spilled partial is saved as an ordinary DB_VALUE; finalize the word
        * accumulator first. (rounding at a spill boundary; see the design note) */
       if (value->accumulators[i].num_sum_acc.is_active)
 	{
