@@ -232,8 +232,7 @@ static unsigned char float_numeric_sub (const uint64_t * arg1_word, const uint64
 static int float_numeric_sub_fast (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word,
 				   int calc_words, bool dbv1_sign, bool dbv2_sign, bool * result_sign,
 				   uint8_t * result_buf);
-static void float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_win,
-				   bool val_neg);
+static void float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, bool val_neg);
 static void numeric_mul (DB_C_NUMERIC a1, DB_C_NUMERIC a2, DB_C_NUMERIC answer, bool * is_value_negative);
 static void float_numeric_mul (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word,
 			       int calc_words, int calc_nbytes);
@@ -4175,6 +4174,38 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 }
 
 /*
+ * numeric_sum_acc_add_acc () - merge one word accumulator into another
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW when the merged sum outgrows the buffer
+ *   acc(in/out) : active destination accumulator
+ *   other(in)   : active source accumulator; left untouched
+ *
+ * Note:
+ *   Merging in the word domain is what keeps "round once per group" true when the sum
+ *   was split up. The alternative -- finalize the source into a DB_VALUE and feed that
+ *   back in -- rounds once per merge, so a scan with N workers rounds N times where the
+ *   serial plan rounds once, and the two answers part company as soon as a partial sum
+ *   passes DB_MAX_NUMERIC_PRECISION.
+ *
+ *   A source that came back from a spill file cannot be merged this way: the words do
+ *   not fit the list file's three columns, so they were already finalized on the way
+ *   out. That path stays with numeric_sum_acc_accumulate ()'s seed.
+ */
+int
+numeric_sum_acc_add_acc (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
+{
+  uint64_t val_words[NUMERIC_SUM_ACC_WORDS];
+
+  assert (acc != NULL && acc->is_active);
+  assert (other != NULL && other->is_active);
+  assert (other->used_words >= 1 && other->used_words <= NUMERIC_SUM_ACC_WORDS);
+
+  /* numeric_sum_acc_add_core () normalizes the value in place, so it gets its own copy */
+  memcpy (val_words, other->words, sizeof (val_words));
+
+  return numeric_sum_acc_add_core (acc, val_words, other->used_words, other->scale, other->is_negative);
+}
+
+/*
  * numeric_sum_acc_accumulate () - accumulate one NUMERIC value, first reconciling the
  *                                 accumulator with the caller's running DB_VALUE
  *   return: NO_ERROR, or ER_FAILED
@@ -4284,8 +4315,8 @@ float_numeric_add_acc (NUMERIC_SUM_ACC * acc, const uint64_t * val_p, int val_us
  *   return: none -- a magnitude subtraction cannot overflow
  *   acc(in/out)   : active word accumulator, opposite sign to the value
  *   val_words(in) : full-width staging buffer holding the coefficient at its tail
- *   val_used(in)  : active word count of the staged coefficient
- *   val_win(in)   : how many tail words of val_words are already initialized
+ *   val_used(in)  : active word count of the staged coefficient; the words above it
+ *                   are uninitialized staging space, not zeros
  *   val_neg(in)   : sign of the value
  *
  * Note: Mixed signs are rare in SUM workloads. The larger magnitude is always the
@@ -4294,7 +4325,7 @@ float_numeric_add_acc (NUMERIC_SUM_ACC * acc, const uint64_t * val_p, int val_us
  *       opposite of the O(1) update the add path gets.
  */
 static void
-float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_win, bool val_neg)
+float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, bool val_neg)
 {
   int win, top, i;
 
@@ -4302,9 +4333,9 @@ float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used
   top = NUMERIC_SUM_ACC_WORDS - win;
 
   /* the coefficient sits at the tail; zero only the window words above it */
-  if (win > val_win)
+  if (win > val_used)
     {
-      memset (&val_words[top], 0, (size_t) (win - val_win) * sizeof (uint64_t));
+      memset (&val_words[top], 0, (size_t) (win - val_used) * sizeof (uint64_t));
     }
 
   if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
@@ -4334,24 +4365,30 @@ float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used
  *                               a full-width word buffer into an active accumulator
  *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
  *   acc(in/out)   : active word accumulator
- *   val_words(in) : full-width staging buffer; the low NUMERIC_AS_WORDS words hold
- *                   the coefficient, upper words are written only by this function
- *   val_used(in)  : active word count of the staged coefficient
+ *   val_words(in) : full-width staging buffer; the low val_used words hold the
+ *                   coefficient, the ones above it are scratch this function writes
+ *   val_used(in)  : active word count of the staged coefficient, 1 .. NUMERIC_SUM_ACC_WORDS
  *   val_scale(in) : scale of the staged value
  *   val_neg(in)   : sign of the staged value
  *
  * Note: after aligning the scales this only picks a direction -- same sign goes to
  *       float_numeric_add_acc (), mixed sign to float_numeric_sub_acc ().
+ *
+ *       val_used, not NUMERIC_AS_WORDS, bounds the coefficient: a value staged from a
+ *       DB_VALUE never exceeds NUMERIC_AS_WORDS, but one staged from another accumulator
+ *       (numeric_sum_acc_add_acc ()) can fill the whole buffer, and treating its upper
+ *       words as scratch would erase them.
  */
 static int
 numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_scale, bool val_neg)
 {
   const uint64_t *val_p;
-  int val_win, w;
+  int w;
   uint64_t carry = 0;
 
-  val_p = &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS];
-  val_win = NUMERIC_AS_WORDS;
+  assert (val_used >= 1 && val_used <= NUMERIC_SUM_ACC_WORDS);
+
+  val_p = &val_words[NUMERIC_SUM_ACC_WORDS - val_used];
 
   /* Align scales; a no-op for fixed-scale columns.
    *
@@ -4384,6 +4421,8 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
       w = val_used + (acc->scale - val_scale) / NUMERIC_DIGITS_PER_WORD + 1;
       if (w < NUMERIC_AS_WORDS)
 	{
+	  /* float_numeric_mul_normalize () works through numeric_words_to_bytes (), which
+	   * cannot address a window narrower than this */
 	  w = NUMERIC_AS_WORDS;
 	}
       if (w > NUMERIC_SUM_ACC_WORDS)
@@ -4393,14 +4432,13 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
 	  w = NUMERIC_SUM_ACC_WORDS;
 	}
       /* the coefficient is already in place at the tail; zero only the headroom */
-      memset (&val_words[NUMERIC_SUM_ACC_WORDS - w], 0, (size_t) (w - NUMERIC_AS_WORDS) * sizeof (uint64_t));
+      memset (&val_words[NUMERIC_SUM_ACC_WORDS - w], 0, (size_t) (w - val_used) * sizeof (uint64_t));
       carry = float_numeric_mul_normalize (&val_words[NUMERIC_SUM_ACC_WORDS - w], w, w * (int) sizeof (uint64_t),
 					   acc->scale - val_scale);
 
       /* w already bounds the widened value (val_used + shift words), reuse it */
       val_used = w;
       val_p = &val_words[NUMERIC_SUM_ACC_WORDS - w];
-      val_win = w;
     }
 
   if (carry != 0)
@@ -4415,10 +4453,10 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
 
   if (acc->is_negative == val_neg)
     {
-      return float_numeric_add_acc (acc, &val_p[val_win - val_used], val_used);
+      return float_numeric_add_acc (acc, val_p, val_used);
     }
 
-  float_numeric_sub_acc (acc, val_words, val_used, val_win, val_neg);
+  float_numeric_sub_acc (acc, val_words, val_used, val_neg);
   return NO_ERROR;
 }
 

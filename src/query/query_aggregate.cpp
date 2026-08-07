@@ -323,11 +323,41 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
     case PT_AGG_BIT_XOR:
     case PT_AVG:
     case PT_SUM:
-      /* POC: if the source partial lives in a word accumulator, finalize it into
-       * new_acc->value first so it can be treated as an ordinary value below.
-       * Gated so gate-off never depends on the field being zero-initialized. */
+      /* POC: a source that still has its words is merged in the word domain, so no partial
+       * sum is rounded on the way in and the group is still rounded exactly once, at
+       * finalize.  That is what keeps a parallel scan -- which merges one accumulator per
+       * worker -- agreeing with the serial plan once a partial sum passes
+       * DB_MAX_NUMERIC_PRECISION.  Gated so gate-off never depends on the field being
+       * zero-initialized. */
       if (qdata_numeric_sum_acc_enabled () && new_acc->num_sum_acc.is_active)
 	{
+	  if (acc->num_sum_acc.is_active)
+	    {
+	      if (numeric_sum_acc_add_acc (&acc->num_sum_acc, &new_acc->num_sum_acc) != NO_ERROR)
+		{
+		  return ER_FAILED;
+		}
+	      /* curr_cnt is summed after the switch */
+	      break;
+	    }
+
+	  if (acc->curr_cnt < 1)
+	    {
+	      /* nothing accumulated here yet -- take the whole state rather than rounding it
+	       * through a DB_VALUE.  acc->value is not the running sum in this mode, but keep
+	       * it in step so its domain matches what finalize will write back. */
+	      acc->num_sum_acc = new_acc->num_sum_acc;
+	      pr_clear_value (acc->value);
+	      if (pr_clone_value (new_acc->value, acc->value) != NO_ERROR)
+		{
+		  return ER_FAILED;
+		}
+	      break;
+	    }
+
+	  /* acc carries a partial sum that exists only as a DB_VALUE -- it came back from a
+	   * spill file, where the words do not fit the list file's three columns.  The source
+	   * has to become a value too and go through the seed path below. */
 	  if (numeric_sum_acc_finalize (&new_acc->num_sum_acc, new_acc->value) != NO_ERROR)
 	    {
 	      return ER_FAILED;

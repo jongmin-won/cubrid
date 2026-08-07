@@ -250,6 +250,7 @@ extern bool numeric_poc_gate_enabled (void);
 extern int numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
 extern int numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from,
 				       const DB_VALUE * value);
+extern int numeric_sum_acc_add_acc (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other);
 extern int numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative);
 extern int numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 extern int numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
