@@ -135,49 +135,15 @@ qdata_numeric_sum_acc_enabled (void)
 /* POC B2: word-domain evaluation of NUMERIC-only {+,-,x} aggregate operand trees.
  * The arithmetic lives in numeric_opfunc.c (NUMERIC_POC_CHAIN_VAL); what remains
  * here is walking the operand tree. Division and any unsupported shape fall back
- * to the legacy DB_VALUE path. */
-static bool
-qdata_poc_leaf_to_chain (const DB_VALUE *dv, NUMERIC_POC_CHAIN_VAL *out)
-{
-  if (dv == NULL || DB_IS_NULL (dv))
-    {
-      return false;
-    }
-
-  switch (DB_VALUE_DOMAIN_TYPE (dv))
-    {
-    case DB_TYPE_NUMERIC:
-      return numeric_poc_chain_from_dbv (dv, out);
-
-    case DB_TYPE_INTEGER:
-    {
-      INT64 v = db_get_int (dv);
-
-      numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
-      return true;
-    }
-
-    case DB_TYPE_SHORT:
-    {
-      INT64 v = db_get_short (dv);
-
-      numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
-      return true;
-    }
-
-    case DB_TYPE_BIGINT:
-    {
-      INT64 v = db_get_bigint (dv);
-
-      /* the unsigned negation also covers INT64_MIN */
-      numeric_poc_chain_from_u128 ((uint128_t) (v < 0 ? - (UINT64) v : (UINT64) v), 0, v < 0, out);
-      return true;
-    }
-
-    default:
-      return false;
-    }
-}
+ * to the legacy DB_VALUE path.
+ *
+ * Leaves go through numeric_poc_chain_from_dbv (), the same one fetch_poc_eval_chain ()
+ * uses, so both entry points accept exactly the same set. This used to carry extra
+ * INTEGER/SHORT/BIGINT branches on the theory that a mixed-type operand would arrive
+ * with an integer leaf; instrumenting it showed that never happens. An integer literal
+ * is promoted to NUMERIC when the plan is built, and an integer column arrives wrapped
+ * in T_CAST_WRAP, which fetch_poc_chain_shape_ok () turns away once per query -- so the
+ * branches were unreachable, and the two entry points only looked like they differed. */
 
 static bool
 qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out)
@@ -188,9 +154,9 @@ qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out
   switch (regu->type)
     {
     case TYPE_CONSTANT:
-      return qdata_poc_leaf_to_chain (regu->value.dbvalptr, out);
+      return numeric_poc_chain_from_dbv (regu->value.dbvalptr, out);
     case TYPE_DBVAL:
-      return qdata_poc_leaf_to_chain (&regu->value.dbval, out);
+      return numeric_poc_chain_from_dbv (&regu->value.dbval, out);
     case TYPE_INARITH:
       break;
     default:
