@@ -15971,6 +15971,12 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 
 	  /* domains not resolved */
 	  xasl->proc.buildvalue.agg_domains_resolved = 0;
+
+	  /* Flag the operand expressions that exist only to feed an aggregate, so that the
+	   * word chain can pick them up. Done here, before any scan starts and before
+	   * parallel workers are spawned, so that the serial path and every worker -- which
+	   * inherits the regu flags -- agree. */
+	  qexec_mark_aggregate_operand_expressions (xasl);
 	}
 
       multi_upddel = QEXEC_IS_MULTI_TABLE_UPDATE_DELETE (xasl);
@@ -21214,15 +21220,23 @@ qexec_resolve_domains_for_aggregation (THREAD_ENTRY * thread_p, AGGREGATE_TYPE *
 }
 
 /*
- * qexec_mark_aggregate_operand_expressions () - flag output expressions that only
+ * qexec_mark_aggregate_operand_expressions () - flag the expressions that only
  *                                               feed an aggregate
- *   xasl(in/out): BUILDLIST_PROC whose output expressions are marked
+ *   xasl(in/out): BUILDLIST_PROC or BUILDVALUE_PROC whose operand expressions are marked
  *
- * A hash aggregation evaluates its operand expressions while building the output
- * tuple descriptor, and the aggregate nodes then read the result through a
+ * The two proc types reach their operand expression differently.
+ *
+ * A hash aggregation (BUILDLIST) evaluates the expression while building the output
+ * tuple descriptor, and the aggregate node then reads the result through a
  * TYPE_CONSTANT operand pointing at the very DB_VALUE the expression wrote
  * (regu->vfetch_to). Matching those two pointers identifies the expressions that
  * exist solely to feed an aggregate.
+ *
+ * A BUILDVALUE has no such indirection -- the aggregate's operand *is* the expression
+ * regu -- so that one is flagged directly. The serial path does not need the flag
+ * (qdata_evaluate_aggregate_list () already runs the chain on a TYPE_INARITH operand
+ * before fetching), but a parallel worker does: px_scan_result_handler fetches the
+ * operand itself, and fetch_peek_arith () only reaches the chain through this flag.
  *
  * The flag keeps the word chain -- which belongs to the aggregate path -- from
  * reaching general expressions: those stay with the float_numeric_db_value_*
@@ -21234,11 +21248,44 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
   REGU_VARIABLE_LIST regu_p;
   AGGREGATE_TYPE *agg_list, *agg_p;
   VALPTR_LIST *outptr_list;
+  int budget;
 
-  if (xasl == NULL || xasl->type != BUILDLIST_PROC || !qexec_numeric_poc_enabled ())
+  if (xasl == NULL || !qexec_numeric_poc_enabled ())
     {
       /* the gate is settled at load time, so testing it once here keeps it off
        * the row path entirely */
+      return;
+    }
+
+  budget = prm_get_integer_value (PRM_ID_MAX_RECURSION_SQL_DEPTH);
+
+  if (xasl->type == BUILDVALUE_PROC)
+    {
+      /* Narrower than the BUILDLIST rule below, which flags whatever aggregate an
+       * output expression happens to feed: the chain rounds differently from the
+       * per-operation operators, and only SUM/AVG has been measured against that. */
+      for (agg_p = xasl->proc.buildvalue.agg_list; agg_p != NULL; agg_p = agg_p->next)
+	{
+	  if (agg_p->function != PT_SUM && agg_p->function != PT_AVG)
+	    {
+	      continue;
+	    }
+	  if (agg_p->option == Q_DISTINCT || agg_p->operands == NULL
+	      || agg_p->operands->value.type != TYPE_INARITH)
+	    {
+	      continue;
+	    }
+
+	  if (fetch_poc_chain_shape_ok (&agg_p->operands->value, budget))
+	    {
+	      REGU_VARIABLE_SET_FLAG (&agg_p->operands->value, REGU_VARIABLE_AGG_OPERAND);
+	    }
+	}
+      return;
+    }
+
+  if (xasl->type != BUILDLIST_PROC)
+    {
       return;
     }
 
@@ -21263,8 +21310,7 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
 	    {
 	      /* The tree shape is fixed for the whole query, so settle it here and
 	       * let the row path test one flag instead of walking the tree again. */
-	      if (fetch_poc_chain_shape_ok (&regu_p->value,
-					    prm_get_integer_value (PRM_ID_MAX_RECURSION_SQL_DEPTH)))
+	      if (fetch_poc_chain_shape_ok (&regu_p->value, budget))
 		{
 		  REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
 		}

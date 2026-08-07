@@ -611,6 +611,16 @@ namespace parallel_scan
 	pthread_mutex_unlock (&main_thread_p->m_px_lock_mutex);
       }
 
+    /* POC: the flag that opens the word chain is set at run time, and both branches above
+     * hand back a fresh XASL tree -- an xcache clone or one remapped from the packed
+     * stream -- so whatever the main thread marked is not on this copy.  Re-derive it here
+     * rather than teaching the clone to carry regu flags across: FETCH_ALL_CONST and
+     * FETCH_NOT_CONST are per-executor caching decisions that must NOT travel, and a
+     * worker inheriting FETCH_ALL_CONST would return its clone's never-written
+     * arithptr->value.  The tree shape is fixed for the query, so deciding again here
+     * reaches the same answer the main thread did.  The gate is tested inside. */
+    qexec_mark_aggregate_operand_expressions (m_xasl);
+
     m_scan_id = &m_xasl->spec_list->s_id;
 
     m_xasl_state = (xasl_state *) db_private_alloc (&thread_ref, sizeof (xasl_state));
