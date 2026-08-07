@@ -138,12 +138,9 @@ qdata_numeric_sum_acc_enabled (void)
  * to the legacy DB_VALUE path.
  *
  * Leaves go through numeric_poc_chain_from_dbv (), the same one fetch_poc_eval_chain ()
- * uses, so both entry points accept exactly the same set. This used to carry extra
- * INTEGER/SHORT/BIGINT branches on the theory that a mixed-type operand would arrive
- * with an integer leaf; instrumenting it showed that never happens. An integer literal
- * is promoted to NUMERIC when the plan is built, and an integer column arrives wrapped
- * in T_CAST_WRAP, which fetch_poc_chain_shape_ok () turns away once per query -- so the
- * branches were unreachable, and the two entry points only looked like they differed. */
+ * uses, so both entry points accept exactly the same set. A bare integer leaf never
+ * arrives: instrumenting it showed that an integer always reaches a NUMERIC operator
+ * wrapped in T_CAST_WRAP, so the integer case is handled at the wrap instead. */
 
 static bool
 qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out)
@@ -164,7 +161,29 @@ qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out
     }
 
   arith = regu->value.arithptr;
-  if (arith == NULL || arith->leftptr == NULL || arith->rightptr == NULL
+  if (arith == NULL)
+    {
+      return false;
+    }
+
+  if (arith->opcode == T_CAST_WRAP && arith->rightptr != NULL)
+    {
+      /* Absorb the wrapped integer the same way fetch_poc_eval_chain () does, so both
+       * entry points fuse the same trees.  This walker has no thread context, so only a
+       * source it can read on its own qualifies; anything else falls back, and the
+       * caller's fetch_peek_dbval () re-runs the tree through the other entry. */
+      switch (arith->rightptr->type)
+	{
+	case TYPE_CONSTANT:
+	  return numeric_poc_chain_from_int_dbv (arith->rightptr->value.dbvalptr, out);
+	case TYPE_DBVAL:
+	  return numeric_poc_chain_from_int_dbv (&arith->rightptr->value.dbval, out);
+	default:
+	  return false;
+	}
+    }
+
+  if (arith->leftptr == NULL || arith->rightptr == NULL
       || (arith->opcode != T_ADD && arith->opcode != T_SUB && arith->opcode != T_MUL))
     {
       return false;

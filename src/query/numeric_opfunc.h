@@ -239,7 +239,7 @@ struct numeric_poc_chain_val
 };
 
 extern bool numeric_poc_chain_from_dbv (const DB_VALUE * dbv, NUMERIC_POC_CHAIN_VAL * out);
-extern void numeric_poc_chain_from_u128 (uint128_t coeff, int scale, bool is_negative, NUMERIC_POC_CHAIN_VAL * out);
+extern bool numeric_poc_chain_from_int_dbv (const DB_VALUE * dbv, NUMERIC_POC_CHAIN_VAL * out);
 extern bool numeric_poc_chain_mul (const NUMERIC_POC_CHAIN_VAL * left, const NUMERIC_POC_CHAIN_VAL * right,
 				   NUMERIC_POC_CHAIN_VAL * out);
 extern bool numeric_poc_chain_add (const NUMERIC_POC_CHAIN_VAL * left, const NUMERIC_POC_CHAIN_VAL * right,

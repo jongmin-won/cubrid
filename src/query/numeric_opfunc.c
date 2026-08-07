@@ -4520,7 +4520,7 @@ numeric_poc_digits_u128 (uint128_t coeff)
  * numeric_poc_chain_from_u128 () - build a chain value from a coefficient that is
  *                                  already held in 128 bits
  */
-void
+static void
 numeric_poc_chain_from_u128 (uint128_t coeff, int scale, bool is_negative, NUMERIC_POC_CHAIN_VAL * out)
 {
   out->coeff = coeff;
@@ -4556,6 +4556,62 @@ numeric_poc_chain_from_dbv (const DB_VALUE * dbv, NUMERIC_POC_CHAIN_VAL * out)
 
   db_get_numeric_precision_and_scale (dbv, &prec, &dbv_scale, NULL);
   numeric_poc_chain_from_u128 (((uint128_t) w[1] << 64) | w[2], dbv_scale, numeric_is_negative (dbv), out);
+  return true;
+}
+
+/*
+ * numeric_poc_chain_from_int_dbv () - build a chain value from an integer operand
+ *   return: true when the value was taken, false to leave the tree to the legacy path
+ *   dbv(in): a SHORT, INTEGER or BIGINT value
+ *   out(out): the chain value
+ *
+ * Type checking never hands an integer to a NUMERIC operator directly; it wraps it in
+ * T_CAST_WRAP first, onto the domain pt_coerce_expression_argument () builds from
+ * DB_DEFAULT_NUMERIC_PRECISION and DB_DEFAULT_NUMERIC_SCALE.
+ *
+ * The scale of zero used here is the source's, not that domain's. A precision of
+ * DB_DEFAULT_NUMERIC_PRECISION marks a float numeric, whose real precision and scale
+ * live in the value header rather than the domain -- db_get_numeric_scale () reads them
+ * from there -- so the domain promises nothing about scale. What does promise it is the
+ * operand being an integer: there are no fractional digits for the cast to record, so
+ * the NUMERIC it would produce carries the integer's own digits at scale zero. Loading
+ * the integer here is therefore bit-identical to running the cast and reading the result
+ * back, and it skips the DB_VALUE the cast would have packed.
+ *
+ * Every integer type fits int64, and int64 fits the 128-bit coefficient with room to
+ * spare, so there is no width to reject.
+ */
+bool
+numeric_poc_chain_from_int_dbv (const DB_VALUE * dbv, NUMERIC_POC_CHAIN_VAL * out)
+{
+  int64_t v;
+  uint64_t magnitude;
+
+  if (dbv == NULL || DB_IS_NULL (dbv))
+    {
+      return false;
+    }
+
+  switch (DB_VALUE_DOMAIN_TYPE (dbv))
+    {
+    case DB_TYPE_SHORT:
+      v = (int64_t) db_get_short (dbv);
+      break;
+    case DB_TYPE_INTEGER:
+      v = (int64_t) db_get_int (dbv);
+      break;
+    case DB_TYPE_BIGINT:
+      v = (int64_t) db_get_bigint (dbv);
+      break;
+    default:
+      return false;
+    }
+
+  /* unsigned subtraction wraps by definition, which makes INT64_MIN an ordinary case
+   * rather than one to step around; 0 - u is written instead of -u because MSVC warns
+   * on a unary minus applied to an unsigned operand */
+  magnitude = (v < 0) ? (0 - (uint64_t) v) : (uint64_t) v;
+  numeric_poc_chain_from_u128 ((uint128_t) magnitude, 0, v < 0, out);
   return true;
 }
 

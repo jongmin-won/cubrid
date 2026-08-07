@@ -68,6 +68,7 @@ static int fetch_peek_min_max_value_of_width_bucket_func (THREAD_ENTRY * thread_
 							  val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl,
 							  DB_VALUE ** min, DB_VALUE ** max);
 
+static bool fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, int budget);
 static bool fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
 				  QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out);
 
@@ -84,9 +85,10 @@ static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VAL
  *
  * The shape is checked before any operand is read, so that a tree which only
  * turns out to be unfusable later (a value too wide, say) can be re-evaluated by
- * the legacy path without any operand being evaluated twice. Only leaves that
- * are plain value references qualify, which is what makes that re-evaluation
- * free of side effects: operators such as T_INCR never reach the chain.
+ * the legacy path without any operand being evaluated twice. A leaf is either a
+ * plain value reference or an integer that type checking wrapped for a NUMERIC
+ * operator, and reading one has no side effect -- which is what makes that
+ * re-evaluation safe: operators such as T_INCR never reach the chain.
  *
  * The chain descends on its own without touching the recursion counter that
  * fetch_peek_arith () maintains, so a tree deep enough to exhaust
@@ -95,6 +97,52 @@ static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VAL
  */
 bool
 fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
+{
+  /* The root has to be one of the fusable operators, not a cast: a lone cast has nothing
+   * to fuse, and reaching the chain for it would only add a tree walk to what the general
+   * path already does in one step. */
+  if (regu_var->type != TYPE_INARITH || regu_var->value.arithptr == NULL
+      || (regu_var->value.arithptr->opcode != T_ADD && regu_var->value.arithptr->opcode != T_SUB
+	  && regu_var->value.arithptr->opcode != T_MUL))
+    {
+      return false;
+    }
+
+  return fetch_poc_chain_node_ok (regu_var, budget);
+}
+
+/*
+ * fetch_poc_chain_int_source () - is this the integer side of a widening cast?
+ *   return: true for a SHORT, INTEGER or BIGINT operand
+ */
+static bool
+fetch_poc_chain_int_source (const REGU_VARIABLE * regu_var)
+{
+  if (regu_var->domain == NULL)
+    {
+      return false;
+    }
+
+  switch (TP_DOMAIN_TYPE (regu_var->domain))
+    {
+    case DB_TYPE_SHORT:
+    case DB_TYPE_INTEGER:
+    case DB_TYPE_BIGINT:
+      return true;
+    default:
+      /* the domain only decides whether to try; the value's own type is checked again
+       * when it is read, so a domain that turns out to be wrong costs a fallback and
+       * never a wrong answer */
+      return false;
+    }
+}
+
+/*
+ * fetch_poc_chain_node_ok () - the recursive half of fetch_poc_chain_shape_ok ()
+ *   return: true if this subtree can be fused
+ */
+static bool
+fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, int budget)
 {
   const ARITH_TYPE *arithptr;
 
@@ -119,14 +167,48 @@ fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
     }
 
   arithptr = regu_var->value.arithptr;
-  if (arithptr == NULL || arithptr->leftptr == NULL || arithptr->rightptr == NULL
+  if (arithptr == NULL)
+    {
+      return false;
+    }
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      /* An integer wrapped for a NUMERIC operation is a leaf as far as the chain is
+       * concerned: fetch_poc_eval_chain () loads the integer itself rather than running
+       * the cast, so there is nothing below to walk.  See
+       * numeric_poc_chain_from_int_dbv () for why that reproduces the cast exactly.
+       *
+       * Only the implicit wrap qualifies.  An explicit T_CAST can narrow, and stepping
+       * around it would swallow the overflow it exists to raise.  Every other cast keeps
+       * the whole tree on the legacy path: the chain cannot reproduce a conversion it
+       * does not perform, and absorbing one as a fetched DB_VALUE was measured to cost
+       * more than it saved -- the cast still builds its DB_VALUE, and the chain then adds
+       * a word conversion on top of it.
+       *
+       * The target has to be the one pt_coerce_expression_argument () builds for a
+       * NUMERIC common type.  Not every wrap uses it: where an argument is typed
+       * PT_TYPE_MAYBE, pt_eval_expr_type () wraps it onto the other operand's data type
+       * instead, which can carry a scale.  Casting an integer onto NUMERIC(15, 2) is
+       * still exact but places the digits two positions over, so those trees are left
+       * alone.  Comparing against the default precision and scale is enough to tell the
+       * two apart, and it costs nothing at run time -- the shape is settled once per
+       * query, in qexec_mark_aggregate_operand_expressions (). */
+      return (arithptr->rightptr != NULL && regu_var->domain != NULL
+	      && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NUMERIC
+	      && regu_var->domain->precision == DB_DEFAULT_NUMERIC_PRECISION
+	      && regu_var->domain->scale == DB_DEFAULT_NUMERIC_SCALE
+	      && fetch_poc_chain_int_source (arithptr->rightptr));
+    }
+
+  if (arithptr->leftptr == NULL || arithptr->rightptr == NULL
       || (arithptr->opcode != T_ADD && arithptr->opcode != T_SUB && arithptr->opcode != T_MUL))
     {
       return false;
     }
 
-  return (fetch_poc_chain_shape_ok (arithptr->leftptr, budget - 1)
-	  && fetch_poc_chain_shape_ok (arithptr->rightptr, budget - 1));
+  return (fetch_poc_chain_node_ok (arithptr->leftptr, budget - 1)
+	  && fetch_poc_chain_node_ok (arithptr->rightptr, budget - 1));
 }
 
 /*
@@ -134,10 +216,12 @@ fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
  *   return: true when the whole tree was fused, false to fall back
  *   out(out): fused result
  *
- * Every operand must be a NUMERIC that fits a chain. Mixing in an integer would
- * route the legacy path through numeric_db_value_* instead of
- * float_numeric_db_value_*, which derives precision differently, so such trees
- * fall back rather than risk a different precision or scale.
+ * Every operand must be a NUMERIC that fits a chain, or an integer that type checking
+ * has wrapped for a NUMERIC operator. A bare integer leaf -- one the legacy path would
+ * route through numeric_db_value_* instead of float_numeric_db_value_*, deriving
+ * precision differently -- is not accepted, and such trees fall back rather than risk a
+ * different precision or scale. The wrap is what tells the two cases apart: its presence
+ * is type checking stating that the operation is a NUMERIC one.
  */
 static bool
 fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
@@ -159,6 +243,23 @@ fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_des
     }
 
   arithptr = regu_var->value.arithptr;
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      DB_VALUE *peek_int = NULL;
+
+      /* Read the integer the cast would have widened and load it straight into the
+       * chain, leaving the cast node itself unevaluated.  What that skips is the whole
+       * conversion: the general path would dispatch through fetch_peek_arith () and pack
+       * a 17-byte NUMERIC into arithptr->value, once per row, only for the chain to
+       * unpack it again.  Here it costs an int64 read and a widening. */
+      if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_int) != NO_ERROR)
+	{
+	  return false;
+	}
+      return numeric_poc_chain_from_int_dbv (peek_int, out);
+    }
+
   if (!fetch_poc_eval_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
       || !fetch_poc_eval_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
     {
