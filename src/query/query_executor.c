@@ -21289,6 +21289,23 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
       return;
     }
 
+  /* Analytic SUM/AVG is deliberately not covered, and the reason is not obvious enough to
+   * leave unwritten -- four attempts at flagging it all measured zero chain calls:
+   *
+   *   func_p->operand          pt_to_analytic_node () always builds it as TYPE_CONSTANT
+   *                            pointing at an a_val_list slot (xasl_generation.c), so it is
+   *                            never an expression
+   *   a_eval_list              same thing, reached from the other side
+   *   a_outptr_list_ex         the output list, not what evaluates the operand
+   *   a_scan_regu_list         where the expression really is by construction -- it fills
+   *                            the slot during the scan, before the sort the analytic needs
+   *                            -- and flagging it still produced no chain call
+   *
+   * A flat query (no derived table) behaves the same, so it is not a matter of the marking
+   * failing to reach an inner XASL either.  Whatever consumes those regu variables does not
+   * route through fetch_peek_arith (), and that is where the next attempt should start
+   * looking.  The accumulator itself works on the analytic path; only this fusion does not. */
+
   agg_list = xasl->proc.buildlist.g_agg_list;
   outptr_list = xasl->outptr_list;
   if (agg_list == NULL || outptr_list == NULL)
