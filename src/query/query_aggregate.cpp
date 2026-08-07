@@ -137,7 +137,7 @@ qdata_numeric_sum_acc_enabled (void)
  * here is walking the operand tree. Division and any unsupported shape fall back
  * to the legacy DB_VALUE path. */
 static bool
-qdata_poc_leaf_to_chain (const DB_VALUE * dv, NUMERIC_POC_CHAIN_VAL * out)
+qdata_poc_leaf_to_chain (const DB_VALUE *dv, NUMERIC_POC_CHAIN_VAL *out)
 {
   if (dv == NULL || DB_IS_NULL (dv))
     {
@@ -150,29 +150,29 @@ qdata_poc_leaf_to_chain (const DB_VALUE * dv, NUMERIC_POC_CHAIN_VAL * out)
       return numeric_poc_chain_from_dbv (dv, out);
 
     case DB_TYPE_INTEGER:
-      {
-	INT64 v = db_get_int (dv);
+    {
+      INT64 v = db_get_int (dv);
 
-	numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
-	return true;
-      }
+      numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
+      return true;
+    }
 
     case DB_TYPE_SHORT:
-      {
-	INT64 v = db_get_short (dv);
+    {
+      INT64 v = db_get_short (dv);
 
-	numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
-	return true;
-      }
+      numeric_poc_chain_from_u128 ((uint128_t) (uint64_t) (v < 0 ? -v : v), 0, v < 0, out);
+      return true;
+    }
 
     case DB_TYPE_BIGINT:
-      {
-	INT64 v = db_get_bigint (dv);
+    {
+      INT64 v = db_get_bigint (dv);
 
-	/* the unsigned negation also covers INT64_MIN */
-	numeric_poc_chain_from_u128 ((uint128_t) (v < 0 ? -(UINT64) v : (UINT64) v), 0, v < 0, out);
-	return true;
-      }
+      /* the unsigned negation also covers INT64_MIN */
+      numeric_poc_chain_from_u128 ((uint128_t) (v < 0 ? - (UINT64) v : (UINT64) v), 0, v < 0, out);
+      return true;
+    }
 
     default:
       return false;
@@ -180,7 +180,7 @@ qdata_poc_leaf_to_chain (const DB_VALUE * dv, NUMERIC_POC_CHAIN_VAL * out)
 }
 
 static bool
-qdata_poc_eval_word_chain (const REGU_VARIABLE * regu, NUMERIC_POC_CHAIN_VAL * out)
+qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out)
 {
   ARITH_TYPE *arith;
   NUMERIC_POC_CHAIN_VAL left, right;
@@ -324,8 +324,9 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
     case PT_AVG:
     case PT_SUM:
       /* POC: if the source partial lives in a word accumulator, finalize it into
-       * new_acc->value first so it can be treated as an ordinary value below. */
-      if (new_acc->num_sum_acc.is_active)
+       * new_acc->value first so it can be treated as an ordinary value below.
+       * Gated so gate-off never depends on the field being zero-initialized. */
+      if (qdata_numeric_sum_acc_enabled () && new_acc->num_sum_acc.is_active)
 	{
 	  if (numeric_sum_acc_finalize (&new_acc->num_sum_acc, new_acc->value) != NO_ERROR)
 	    {
@@ -583,51 +584,35 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 
     case PT_AVG:
     case PT_SUM:
-      /* POC: NUMERIC values accumulate into the word accumulator; rounding and packing
-       * are deferred to finalize. acc->value keeps the first value only (its domain info
-       * is still needed), so anything that needs the running sum has to finalize the
-       * accumulator first rather than read acc->value. */
-      if (qdata_numeric_sum_acc_enabled () && DB_VALUE_DOMAIN_TYPE (value) == DB_TYPE_NUMERIC)
-	{
-	  if (acc->curr_cnt < 1)
-	    {
-	      /* first value of this group; discard any stale word state */
-	      acc->num_sum_acc.is_active = false;
-	      copy_operator = true;
-	    }
-	  else if (!acc->num_sum_acc.is_active && DB_VALUE_DOMAIN_TYPE (acc->value) == DB_TYPE_NUMERIC
-		   && !DB_IS_NULL (acc->value))
-	    {
-	      /* acc->value holds a partial sum (e.g. loaded from a hash partial list);
-	       * seed the word accumulator with it before accumulating on top of it */
-	      if (numeric_sum_acc_add_value (&acc->num_sum_acc, acc->value) != NO_ERROR)
-		{
-		  return ER_FAILED;
-		}
-	    }
+      {
+	/* POC: NUMERIC values accumulate into the word accumulator; rounding and packing
+	 * are deferred to finalize. acc->value keeps the first value only (its domain info
+	 * is still needed), so anything that needs the running sum has to finalize the
+	 * accumulator first rather than read acc->value. */
+	bool use_sum_acc = (qdata_numeric_sum_acc_enabled () && DB_VALUE_DOMAIN_TYPE (value) == DB_TYPE_NUMERIC);
 
-	  if (numeric_sum_acc_add_value (&acc->num_sum_acc, value) != NO_ERROR)
-	    {
-	      return ER_FAILED;
-	    }
-	  break;
-	}
-      /*
-       * 여기 기존 조건 안에 NUMERIC을 넣어서 처리하는 방식으로 리팩토링 필요.
-       */
+	if (acc->curr_cnt < 1)
+	  {
+	    copy_operator = true;
+	  }
+	else if (!use_sum_acc)
+	  {
+	    /* values are added up in acc.value */
+	    if (qdata_add_dbval (acc->value, value, acc->value, domain->value_dom) != NO_ERROR)
+	      {
+		return ER_FAILED;
+	      }
+	  }
 
-      if (acc->curr_cnt < 1)
-	{
-	  copy_operator = true;
-	}
-      else
-	{
-	  /* values are added up in acc.value */
-	  if (qdata_add_dbval (acc->value, value, acc->value, domain->value_dom) != NO_ERROR)
-	    {
-	      return ER_FAILED;
-	    }
-	}
+	/* the word accumulator takes every value, the first one included.  acc->value is
+	 * passed as a seed source: a spilled hash entry comes back with its partial sum
+	 * flattened into it and no word state at all. */
+	if (use_sum_acc
+	    && numeric_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, acc->value, value) != NO_ERROR)
+	  {
+	    return ER_FAILED;
+	  }
+      }
       break;
 
     case PT_STDDEV:
@@ -760,15 +745,47 @@ qdata_aggregate_multiple_values_to_accumulator (cubthread::entry *thread_p, cubx
 }
 
 /*
+ * qdata_agg_is_plain_sum_avg () - is this a plain SUM/AVG over one operand?
+ *   return: true if the aggregate may take the fast path in
+ *           qdata_evaluate_aggregate_list ()
+ *
+ * Everything this rejects -- DISTINCT, an ORDER BY inside the aggregate, more than
+ * one operand, any other function -- falls through to the general per-function path,
+ * which is the only place that handles those.
+ *
+ * flag.min_max_optimized is not part of the test, only of the assert below.  The two
+ * assignments that can set it (xasl_generation.c, pt_optimize_min_max_list ()) both sit
+ * under case PT_MIN / case PT_MAX of a switch on the function, and the one call to that
+ * function is itself guarded by (function == PT_MIN || function == PT_MAX).  Every other
+ * site only clears it -- pt_set_access_spec_for_aggregation () wipes it across the whole
+ * list as soon as the query holds an aggregate that is not a min/max-only scan.  So a SUM
+ * or an AVG can never carry it, and qdata_agg_may_share_accumulator () relies on this
+ * assert rather than testing the flag again.
+ */
+static bool
+qdata_agg_is_plain_sum_avg (const cubxasl::aggregate_list_node *agg_p)
+{
+  assert (!agg_p->flag.min_max_optimized || (agg_p->function != PT_SUM && agg_p->function != PT_AVG));
+
+  return ((agg_p->function == PT_SUM || agg_p->function == PT_AVG)
+	  && agg_p->operands != NULL && agg_p->operands->next == NULL
+	  && agg_p->option != Q_DISTINCT && agg_p->sort_list == NULL);
+}
+
+/*
  * qdata_agg_may_share_accumulator () - can this aggregate take part in accumulator sharing?
  *   return: true for a plain SUM/AVG over a single referenced value
  */
 static bool
 qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
 {
-  return ((agg_p->function == PT_SUM || agg_p->function == PT_AVG)
-	  && agg_p->option != Q_DISTINCT && agg_p->sort_list == NULL && !agg_p->flag.agg_optimized
-	  && !agg_p->flag.min_max_optimized && agg_p->operands != NULL && agg_p->operands->next == NULL
+  /* the leading test also settles operands != NULL, so the dereferences below are safe.
+   * flag.agg_optimized is kept as a runtime test even though a SUM/AVG cannot carry it
+   * either (same block in xasl_generation.c, gated on COUNT_STAR/MIN/MAX): unlike
+   * min_max_optimized it makes qdata_evaluate_aggregate_list () skip the aggregate
+   * outright, so a sharer pointing at one would copy an accumulator nobody ever filled.
+   * This runs once per query, so the check is free. */
+  return (qdata_agg_is_plain_sum_avg (agg_p) && !agg_p->flag.agg_optimized
 	  && agg_p->operands->value.type == TYPE_CONSTANT && agg_p->operands->value.value.dbvalptr != NULL
 	  && agg_p->accumulator_domain.value_dom != NULL);
 }
@@ -864,10 +881,11 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  continue;
 	}
 
-      if (accumulator->shared_from > 0)
+      if (qdata_numeric_sum_acc_enabled () && accumulator->shared_from > 0)
 	{
 	  /* an earlier aggregate accumulates this same sum; the state is copied
-	   * from it at finalize time */
+	   * from it at finalize time.  Gated so that a stray index can never make
+	   * the gate-off path skip an aggregate outright. */
 	  continue;
 	}
 
@@ -901,39 +919,65 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  continue;
 	}
 
-      /* POC B2: NUMERIC-only {+,-,x} operand expressions evaluate entirely in the
-       * word domain and feed the live accumulator directly -- no DB_VALUE round
-       * trips between operations. Division and any unsupported shape fall back
-       * to the legacy path below (see qdata_poc_eval_word_chain) */
-      if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
-	  && agg_p->operands != NULL && agg_p->operands->next == NULL && agg_p->option != Q_DISTINCT
-	  && agg_p->sort_list == NULL && !agg_p->flag.min_max_optimized
-	  && accumulator->num_sum_acc.is_active && agg_p->operands->value.type == TYPE_INARITH)
-	{
-	  NUMERIC_POC_CHAIN_VAL cv;
-
-	  if (qdata_poc_eval_word_chain (&agg_p->operands->value, &cv))
-	    {
-	      if (numeric_sum_acc_add_u128 (&accumulator->num_sum_acc, cv.coeff, cv.scale, cv.neg) != NO_ERROR)
-		{
-		  return ER_FAILED;
-		}
-
-	      accumulator->curr_cnt++;
-	      continue;
-	    }
-	}
-
-      /* POC fast path: a single-operand SUM/AVG consumes the operand immediately
-       * (the first value is deep-copied inside qdata_aggregate_value_to_accumulator,
-       * later values are only read), so peek the operand instead of deep-copying it
-       * into a per-row vector */
-      if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
-	  && agg_p->operands != NULL && agg_p->operands->next == NULL && agg_p->option != Q_DISTINCT
-	  && agg_p->sort_list == NULL && !agg_p->flag.min_max_optimized)
+      /* POC: fast path for a plain SUM/AVG over one operand.  It has two layers.
+       *
+       *   outer, any type   -- peek the operand instead of deep-copying it into a
+       *                        per-row DB_VALUE vector, then make the very call the
+       *                        general path would have made.
+       *   inner, NUMERIC    -- word-domain arithmetic and the word accumulator, so
+       *                        rounding and packing are deferred to finalize.
+       *
+       * The outer layer is what makes this correct for every type: nothing below is
+       * skipped.  A plain SUM/AVG reaches only the final 'else' of the general path,
+       * and qdata_aggregate_multiple_values_to_accumulator () forwards a single
+       * operand straight to qdata_aggregate_value_to_accumulator () -- the same call
+       * made here.  Every other branch below (NULL JSON, DISTINCT/sort, the
+       * interpolation functions, GROUP_CONCAT) is either unreachable for SUM/AVG or
+       * already excluded by qdata_agg_is_plain_sum_avg ().
+       *
+       * The inner layer is tried per row, not per query: a NUMERIC-only argument tree
+       * can decline on one row (division, a non-NUMERIC leaf, an overflow) and be taken
+       * on the next, so the same query alternates between the layers. */
+      if (qdata_numeric_sum_acc_enabled () && qdata_agg_is_plain_sum_avg (agg_p))
 	{
 	  DB_VALUE *peek_val = NULL;
 
+	  /* ---- NUMERIC only -------------------------------------------------
+	   * Evaluate a {+,-,x} argument tree whole in the word domain, so not even
+	   * one DB_VALUE is built.  There is no type test here because is_active is
+	   * itself the type gate: it means "a NUMERIC value has already been
+	   * accumulated".  numeric_sum_acc_add_value () is the only thing that turns it
+	   * on -- directly or through numeric_sum_acc_accumulate () -- and every call to
+	   * it sits behind a NUMERIC check; the chain entry point
+	   * (numeric_sum_acc_add_u128 ()) asserts is_active instead of seeding.
+	   *
+	   * A purely integer argument therefore never gets here: its first row fails
+	   * the NUMERIC test below, is_active stays off, and this branch stays
+	   * unreachable for the rest of the group.
+	   *
+	   * Note the flag says nothing about *this* row -- an expression or a host
+	   * variable can change type per row, which is why the peek path below still
+	   * tests the value itself. */
+	  if (accumulator->num_sum_acc.is_active && agg_p->operands->value.type == TYPE_INARITH)
+	    {
+	      NUMERIC_POC_CHAIN_VAL cv;
+
+	      if (qdata_poc_eval_word_chain (&agg_p->operands->value, &cv))
+		{
+		  if (numeric_sum_acc_add_u128 (&accumulator->num_sum_acc, cv.coeff, cv.scale, cv.neg) != NO_ERROR)
+		    {
+		      return ER_FAILED;
+		    }
+
+		  accumulator->curr_cnt++;
+		  continue;
+		}
+	    }
+
+	  /* ---- any type -----------------------------------------------------
+	   * Peek instead of copy.  Safe whatever the type is: the first value is
+	   * cloned inside qdata_aggregate_value_to_accumulator () and later values
+	   * are only read, so the peeked pointer is never retained. */
 	  if (fetch_peek_dbval (thread_p, &agg_p->operands->value, val_desc_p, NULL, NULL, NULL, &peek_val) != NO_ERROR)
 	    {
 	      return ER_FAILED;
@@ -944,11 +988,11 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	      continue;
 	    }
 
+	  /* ---- NUMERIC only -------------------------------------------------
+	   * The word accumulator is live, so feed it directly and skip the
+	   * per-function dispatch. */
 	  if (accumulator->num_sum_acc.is_active && DB_VALUE_DOMAIN_TYPE (peek_val) == DB_TYPE_NUMERIC)
 	    {
-	      /* the word accumulator is live: feed it directly, skipping the
-	       * per-function dispatch (first values, partial-sum seeding and
-	       * non-NUMERIC rows still take the full path below) */
 	      if (numeric_sum_acc_add_value (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
 		{
 		  return ER_FAILED;
@@ -958,8 +1002,10 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	      continue;
 	    }
 
+	  /* outer: a first value, a reinstated partial, or any non-NUMERIC type.  This
+	   * is the same call the general path below would reach. */
 	  error = qdata_aggregate_value_to_accumulator (thread_p, accumulator, &agg_p->accumulator_domain,
-							agg_p->function, agg_p->domain, peek_val, false);
+		  agg_p->function, agg_p->domain, peek_val, false);
 	  if (error != NO_ERROR)
 	    {
 	      return error;
@@ -1712,7 +1758,8 @@ qdata_finalize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 
       /* POC: turn the word accumulator into acc->value once, before any consumer
        * (AVG's division below, domain casts) reads it. this is the single rounding point. */
-      if ((agg_p->function == PT_SUM || agg_p->function == PT_AVG) && agg_p->accumulator.num_sum_acc.is_active)
+      if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
+	  && agg_p->accumulator.num_sum_acc.is_active)
 	{
 	  error = numeric_sum_acc_finalize (&agg_p->accumulator.num_sum_acc, agg_p->accumulator.value);
 	  if (error != NO_ERROR)
@@ -2930,7 +2977,7 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
     {
       /* POC: a spilled partial is saved as an ordinary DB_VALUE; finalize the word
        * accumulator first. (rounding at a spill boundary; see the design note) */
-      if (value->accumulators[i].num_sum_acc.is_active)
+      if (qdata_numeric_sum_acc_enabled () && value->accumulators[i].num_sum_acc.is_active)
 	{
 	  if (numeric_sum_acc_finalize (&value->accumulators[i].num_sum_acc, value->accumulators[i].value) != NO_ERROR)
 	    {

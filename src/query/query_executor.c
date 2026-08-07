@@ -1207,6 +1207,13 @@ qexec_end_one_iteration (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 	    {
 	      GOTO_EXIT_ON_ERROR;
 	    }
+
+	  if (xasl->proc.buildlist.g_agg_domains_resolved)
+	    {
+	      /* Sharing needs the accumulator domains, so it can only be decided here --
+	       * the same place the parallel worker decides it. */
+	      qdata_link_shared_accumulators (xasl->proc.buildlist.g_agg_list);
+	    }
 	}
 
       /* process tuple */

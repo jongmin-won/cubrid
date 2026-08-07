@@ -231,6 +231,14 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 
       if (fetch_poc_eval_chain (thread_p, regu_var, vd, obj_oid, tpl, &chain_val))
 	{
+	  /* returning early skips the constness decision this function makes at its
+	   * end, and the caller asserts that one of the two flags is set.  Mark it
+	   * NOT_CONST: an aggregate operand reads columns, so its value changes per
+	   * row -- claiming ALL_CONST would make the next call reuse the cached
+	   * arithptr->value instead of re-evaluating. */
+	  REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
+	  assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
+
 	  numeric_poc_chain_to_dbv (&chain_val, arithptr->value);
 	  *peek_dbval = arithptr->value;
 

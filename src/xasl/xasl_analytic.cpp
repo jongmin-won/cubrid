@@ -39,5 +39,9 @@ namespace cubxasl
 
     /* curr_cnt */
     curr_cnt = 0;
+
+    /* Execution-only field, not part of the stream, and the unpack buffer is not
+     * zeroed -- same reason stx_build_aggregate_type () initializes its copy. */
+    num_sum_acc.is_active = false;
   }
 }

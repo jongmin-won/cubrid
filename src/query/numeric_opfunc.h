@@ -248,6 +248,8 @@ extern void numeric_poc_chain_to_dbv (const NUMERIC_POC_CHAIN_VAL * cv, DB_VALUE
 
 extern bool numeric_poc_gate_enabled (void);
 extern int numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
+extern int numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from,
+				       const DB_VALUE * value);
 extern int numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative);
 extern int numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 extern int numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result);

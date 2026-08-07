@@ -36,6 +36,7 @@
 #include "db_json.hpp"
 #include "query_aggregate.hpp"
 #include "xasl_aggregate.hpp"
+#include "numeric_opfunc.h"	// POC: word accumulator
 #include "object_domain.h"
 #include "query_executor.h"
 #include "px_scan_trace_handler.hpp"
@@ -1281,6 +1282,12 @@ namespace parallel_scan
   template <FUNC_CODE F>
   bool result_handler<RESULT_TYPE::BUILDVALUE_OPT>::initialize_node (THREAD_ENTRY *thread_p, AGGREGATE_TYPE *agg_node)
   {
+    /* POC: the worker starts with no word accumulator; accumulate_node () turns it on
+     * when the first NUMERIC value arrives.  Done before any early return because the
+     * worker XASL comes from stx_alloc_struct (), which does not zero the buffer --
+     * mirrors qdata_initialize_aggregate_list () on the serial side. */
+    agg_node->accumulator.num_sum_acc.is_active = false;
+
     if constexpr (F == PT_COUNT_STAR)
       {
 	agg_node->accumulator.curr_cnt = 0;
@@ -1606,6 +1613,44 @@ namespace parallel_scan
 	      }
 	    acc_dom->value2_dom = &tp_Null_domain;
 	  }
+	/* POC: NUMERIC values go into the word accumulator, exactly as the serial and
+	 * BUILDLIST paths do in qdata_aggregate_value_to_accumulator ().  This worker owns
+	 * its own accumulator; finalize_node () merges it through
+	 * qdata_aggregate_accumulator_to_accumulator (), which knows how to drain it.
+	 * acc->value still keeps the first value so its domain information survives. */
+	if (numeric_poc_gate_enabled () && DB_VALUE_DOMAIN_TYPE (db_value_p) == DB_TYPE_NUMERIC)
+	  {
+	    if (acc->curr_cnt < 1)
+	      {
+		pr_clear_value (acc->value);
+		if (pr_clone_value (db_value_p, acc->value) != NO_ERROR)
+		  {
+		    return false;
+		  }
+	      }
+
+	    /* no seed source: this accumulator belongs to one worker and never leaves
+	     * memory, so acc->value can never hold a partial sum the words do not have */
+	    if (numeric_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, NULL, db_value_p) != NO_ERROR)
+	      {
+		return false;
+	      }
+
+	    acc->curr_cnt++;
+	    return true;
+	  }
+
+	/* A live word accumulator means acc->value holds only the first value, not the
+	 * running sum, so the legacy branch below would add onto the wrong base and the
+	 * two partial sums would then fight over the result. The operand type is fixed
+	 * per query, so this is unreachable -- guard it rather than corrupt silently. */
+	if (acc->num_sum_acc.is_active)
+	  {
+	    assert (false);
+	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+	    return false;
+	  }
+
 	if (acc->curr_cnt < 1)
 	  {
 	    DB_TYPE type = DB_VALUE_DOMAIN_TYPE (db_value_p);

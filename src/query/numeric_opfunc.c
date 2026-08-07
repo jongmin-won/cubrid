@@ -65,6 +65,7 @@
 
 #define NUMERIC_AS_WORDS                (3)	/* (DB_NUMERIC_BUF_SIZE(17) + 7) / 8 */
 #define NUMERIC_AS_WORD_BYTES           (24)	/* NUMERIC_AS_WORDS * 8 */
+#define NUMERIC_DIGITS_PER_WORD         (19)	/* digits always fitting a word: 10^19 < 2^64 < 10^20 */
 #define NUMERIC_GET_FULL_WORDS(bytes)   ((bytes) >> 3)	/* Convert bytes to full words (floor) */
 #define NUMERIC_GET_REM_BYTES(bytes)    ((bytes) & 7)	/* Remaining bytes after word alignment */
 #define NUMERIC_GET_WORD_COUNT(bytes)   (((bytes) + 7) >> 3)	/* Total word count to cover bytes (ceiling) */
@@ -219,17 +220,20 @@ static bool numeric_is_zero (DB_C_NUMERIC arg);
 static numeric_magnitude_t numeric_classify_magnitude (DB_C_NUMERIC arg, bool is_value_negative);
 static bool numeric_overflow (DB_C_NUMERIC arg, int exp);
 static void numeric_add (DB_C_NUMERIC arg1, DB_C_NUMERIC arg2, DB_C_NUMERIC answer, int size);
-static void float_numeric_add (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word,
-			       int calc_words);
+static unsigned char float_numeric_add (const uint64_t * dbv1_word, const uint64_t * dbv2_word,
+					uint64_t * result_word, int calc_words);
 static int float_numeric_add_fast (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word,
 				   int calc_words, bool dbv1_sign, bool dbv2_sign, bool * result_sign,
 				   uint8_t * result_buf);
+static int float_numeric_add_acc (NUMERIC_SUM_ACC * acc, const uint64_t * val_p, int val_used);
 static void numeric_sub (DB_C_NUMERIC arg1, DB_C_NUMERIC arg2, DB_C_NUMERIC answer, int size);
-static void float_numeric_sub (const uint64_t * arg1_word, const uint64_t * arg2_word, uint64_t * result_word,
-			       int calc_words);
+static unsigned char float_numeric_sub (const uint64_t * arg1_word, const uint64_t * arg2_word,
+					uint64_t * result_word, int calc_words);
 static int float_numeric_sub_fast (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word,
 				   int calc_words, bool dbv1_sign, bool dbv2_sign, bool * result_sign,
 				   uint8_t * result_buf);
+static void float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_win,
+				   bool val_neg);
 static void numeric_mul (DB_C_NUMERIC a1, DB_C_NUMERIC a2, DB_C_NUMERIC answer, bool * is_value_negative);
 static void float_numeric_mul (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word,
 			       int calc_words, int calc_nbytes);
@@ -287,8 +291,8 @@ static bool numeric_is_longnum_value (DB_C_NUMERIC arg);
 static int numeric_longnum_to_shortnum (DB_C_NUMERIC answer, DB_C_NUMERIC long_arg);
 static void numeric_shortnum_to_longnum (DB_C_NUMERIC long_answer, DB_C_NUMERIC arg);
 static int get_significant_digit (DB_BIGINT i);
-static void float_numeric_mul_pow10 (uint64_t * dbv_buf, int calc_words, int calc_bytes, uint64_t multiplier);
-static void float_numeric_mul_normalize (uint64_t * dbv_buf, int calc_words, int calc_bytes, int exponent);
+static uint64_t float_numeric_mul_pow10 (uint64_t * dbv_buf, int calc_words, int calc_bytes, uint64_t multiplier);
+static uint64_t float_numeric_mul_normalize (uint64_t * dbv_buf, int calc_words, int calc_bytes, int exponent);
 static uint64_t float_numeric_div_pow10 (uint64_t * dbv_buf, int calc_words, int calc_bytes, uint64_t divisor);
 static int float_numeric_div_normalize (uint64_t * dbv_buf, int calc_words, int calc_bytes, int exponent);
 static void float_numeric_increment (uint64_t * calc_buf, int calc_words, uint64_t val);
@@ -904,7 +908,7 @@ numeric_add (DB_C_NUMERIC arg1, DB_C_NUMERIC arg2, DB_C_NUMERIC answer, int size
 
 /*
  * float_numeric_add () -
- *   return: none
+ *   return: carry out of the most significant word (0 or 1)
  *   dbv1_word(in)   : multi-precision operand 1 (word array)
  *   dbv2_word(in)   : multi-precision operand 2 (word array)
  *   result_word(out): result buffer (word array)
@@ -913,20 +917,23 @@ numeric_add (DB_C_NUMERIC arg1, DB_C_NUMERIC arg2, DB_C_NUMERIC answer, int size
  * Note: Performs multi-precision addition on MSB-first word arrays.
  *       The computation proceeds from least significant word to most
  *       significant word, propagating carry across words.
+ *
+ *       Callers that size the buffer from the operand precisions cannot
+ *       overflow it and simply ignore the return value; the SUM accumulator
+ *       works in a fixed 14-word buffer and uses it to detect overflow.
  */
-static void
+static unsigned char
 float_numeric_add (const uint64_t * dbv1_word, const uint64_t * dbv2_word, uint64_t * result_word, int calc_words)
 {
-  uint64_t carry = 0;
+  unsigned char carry = 0;
   int digit;
-  uint128_t sum;
 
   for (digit = calc_words - 1; digit >= 0; digit--)
     {
-      sum = (uint128_t) dbv1_word[digit] + dbv2_word[digit] + carry;
-      result_word[digit] = (uint64_t) sum;
-      carry = (uint64_t) (sum >> 64);
+      carry = _addcarry_u64 (carry, dbv1_word[digit], dbv2_word[digit], (unsigned long long *) &result_word[digit]);
     }
+
+  return carry;
 }
 
 /*
@@ -1005,7 +1012,7 @@ numeric_sub (DB_C_NUMERIC arg1, DB_C_NUMERIC arg2, DB_C_NUMERIC answer, int size
 
 /*
  * float_numeric_sub () -
- *   return: none
+ *   return: borrow out of the most significant word (0 or 1)
  *   arg1_word(in)   : multi-precision operand 1 (word array)
  *   arg2_word(in)   : multi-precision operand 2 (word array)
  *   result_word(out): result buffer (word array)
@@ -1015,20 +1022,22 @@ numeric_sub (DB_C_NUMERIC arg1, DB_C_NUMERIC arg2, DB_C_NUMERIC answer, int size
  *       MSB-first word arrays. The computation proceeds from least
  *       significant word to most significant word, propagating
  *       borrow across words.
+ *
+ *       Every caller subtracts the smaller magnitude from the larger, so the
+ *       borrow is always 0; it is returned only to mirror float_numeric_add ().
  */
-static void
+static unsigned char
 float_numeric_sub (const uint64_t * arg1_word, const uint64_t * arg2_word, uint64_t * result_word, int calc_words)
 {
-  uint64_t borrow = 0;
+  unsigned char borrow = 0;
   int digit;
-  uint128_t diff;
 
   for (digit = calc_words - 1; digit >= 0; digit--)
     {
-      diff = (uint128_t) arg1_word[digit] - arg2_word[digit] - borrow;
-      result_word[digit] = (uint64_t) diff;
-      borrow = (diff >> 64) ? 1 : 0;
+      borrow = _subborrow_u64 (borrow, arg1_word[digit], arg2_word[digit], (unsigned long long *) &result_word[digit]);
     }
+
+  return borrow;
 }
 
 /*
@@ -1426,7 +1435,7 @@ float_numeric_div_fast (uint64_t dividend_val, uint64_t divisor_val,
   /* 3) scale the dividend (normalization). exponent10 > 0 shifts up, < 0 truncates */
   if (exponent10 > 0)
     {
-      float_numeric_mul_normalize (dividend_word, WORD_COUNT, word_bytes, exponent10);
+      (void) float_numeric_mul_normalize (dividend_word, WORD_COUNT, word_bytes, exponent10);
     }
   else if (exponent10 < 0)
     {
@@ -1983,11 +1992,11 @@ float_numeric_compare (uint8_t * arg1, uint8_t * arg2, int prec1, int scale1, in
 
   if (scale_adjust1)
     {
-      float_numeric_mul_normalize (arg1_buf, calc_words, calc_nbytes, scale_adjust1);
+      (void) float_numeric_mul_normalize (arg1_buf, calc_words, calc_nbytes, scale_adjust1);
     }
   if (scale_adjust2)
     {
-      float_numeric_mul_normalize (arg2_buf, calc_words, calc_nbytes, scale_adjust2);
+      (void) float_numeric_mul_normalize (arg2_buf, calc_words, calc_nbytes, scale_adjust2);
     }
 
   /* since we don't convert to absolute values when comparing negative numbers, there's no need to invert the result again */
@@ -2591,11 +2600,11 @@ float_numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   /* 4) scale adjustments */
   if (scale_adjust1)
     {
-      float_numeric_mul_normalize (dbv1_word, calc_words, calc_nbytes, scale_adjust1);
+      (void) float_numeric_mul_normalize (dbv1_word, calc_words, calc_nbytes, scale_adjust1);
     }
   if (scale_adjust2)
     {
-      float_numeric_mul_normalize (dbv2_word, calc_words, calc_nbytes, scale_adjust2);
+      (void) float_numeric_mul_normalize (dbv2_word, calc_words, calc_nbytes, scale_adjust2);
     }
 
   /* fast path */
@@ -2867,11 +2876,11 @@ float_numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   /* 4) scale adjustments */
   if (scale_adjust1)
     {
-      float_numeric_mul_normalize (dbv1_word, calc_words, calc_nbytes, scale_adjust1);
+      (void) float_numeric_mul_normalize (dbv1_word, calc_words, calc_nbytes, scale_adjust1);
     }
   if (scale_adjust2)
     {
-      float_numeric_mul_normalize (dbv2_word, calc_words, calc_nbytes, scale_adjust2);
+      (void) float_numeric_mul_normalize (dbv2_word, calc_words, calc_nbytes, scale_adjust2);
     }
 
   /* fast path */
@@ -3411,8 +3420,8 @@ float_numeric_db_value_div (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   int divisor_exponent = (prec2 - 1) - scale2;
   int exponent_diff = dividend_exponent - divisor_exponent;
 
-  /* fast path */
-  if (prec1 <= 19 && prec2 <= 19)
+  /* fast path: both operands fit in a single word, so only the low word is needed */
+  if (prec1 <= NUMERIC_DIGITS_PER_WORD && prec2 <= NUMERIC_DIGITS_PER_WORD)
     {
       float_numeric_div_fast (dbv1_word[2], dbv2_word[2],
 			      prec1, scale1, prec2, scale2,
@@ -3469,7 +3478,7 @@ float_numeric_db_value_div (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VAL
   /* 7) only dividend_work is scaled (div_pow10 if negative) */
   if (exponent10 > 0)
     {
-      float_numeric_mul_normalize (dividend_work, calc_words, calc_nbytes, exponent10);
+      (void) float_numeric_mul_normalize (dividend_work, calc_words, calc_nbytes, exponent10);
     }
   else if (exponent10 < 0)
     {
@@ -3885,8 +3894,9 @@ numeric_coerce_dec_str_to_num (const char *dec_str, DB_C_NUMERIC result, bool * 
       ntot_digits -= ndigits;
       if (ntot_digits > 0)
 	{
-	  float_numeric_mul_pow10 (result_word, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES,
-				   _gv_mul_normalize_pow10_lookup[15]);
+	  /* the digit string was length-checked against DB_MAX_NUMERIC_PRECISION above */
+	  (void) float_numeric_mul_pow10 (result_word, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES,
+					  _gv_mul_normalize_pow10_lookup[15]);
 	  ndigits = 16;
 	}
     }
@@ -4097,50 +4107,11 @@ float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_buf, int prec
 
       if (tmp_scale > 0)
 	{
-	  float_numeric_mul_normalize (word_buf, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES, tmp_scale);
+	  (void) float_numeric_mul_normalize (word_buf, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES, tmp_scale);
 	}
     }
 
   numeric_words_to_bytes (word_buf, NUMERIC_AS_WORDS, calc_buf);
-}
-
-/*
- * numeric_sum_acc_words_addsub () - add or subtract two word windows with a
- *                                   hardware carry/borrow chain (r = a +/- b)
- *   return: carry (add) or borrow (subtract) out of the most significant word.
- *           For add, nonzero means the sum outgrew the window; possible only
- *           when the window is already clamped to NUMERIC_SUM_ACC_WORDS, since
- *           the window otherwise includes a zero headroom word that absorbs
- *           the carry. For subtract, the precondition |a| >= |b| within the
- *           window guarantees a zero borrow.
- *
- * Note:
- *   - is_subtract is a compile-time constant at every call site, so the
- *     branch folds away after inlining.
- *   - same-index read-then-write, so result may alias either input.
- */
-static inline unsigned char
-numeric_sum_acc_words_addsub (const uint64_t * a, const uint64_t * b, uint64_t * r, int n, bool is_subtract)
-{
-  unsigned char c = 0;
-  int d;
-
-  if (is_subtract)
-    {
-      for (d = n - 1; d >= 0; d--)
-	{
-	  c = _subborrow_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
-	}
-    }
-  else
-    {
-      for (d = n - 1; d >= 0; d--)
-	{
-	  c = _addcarry_u64 (c, a[d], b[d], (unsigned long long *) &r[d]);
-	}
-    }
-
-  return c;
 }
 
 /*
@@ -4204,6 +4175,161 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 }
 
 /*
+ * numeric_sum_acc_accumulate () - accumulate one NUMERIC value, first reconciling the
+ *                                 accumulator with the caller's running DB_VALUE
+ *   return: NO_ERROR, or ER_FAILED
+ *   acc(in/out)   : word accumulator
+ *   is_first(in)  : true if value is the first one of the group / partition.  seed_from
+ *                   is then ignored: there is nothing to reconcile yet, and the caller's
+ *                   running value still belongs to the previous group
+ *   seed_from(in) : where the caller keeps its running value, or NULL if the caller has
+ *                   no path that can strand a partial sum there.  A NUMERIC found here
+ *                   while the accumulator is empty is a running sum the accumulator does
+ *                   not have -- flattened by numeric_sum_acc_finalize () on the way into
+ *                   a spill file, and reloaded as a plain DB_VALUE.  Fold it in first or
+ *                   it is lost
+ *   value(in)     : the NUMERIC value to accumulate
+ *
+ * Note:
+ *   - value always reaches the accumulator, including the first one of a group.  The
+ *     alternative -- parking the first value in the caller's running DB_VALUE and
+ *     seeding from it on the next row -- is NOT safe for every caller: the analytic
+ *     path finalizes mid-partition and AVG overwrites its running value with a DOUBLE
+ *     there, so a value parked there would be gone by the next row.
+ */
+int
+numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from,
+			    const DB_VALUE * value)
+{
+  assert (acc != NULL && value != NULL);
+
+  if (is_first)
+    {
+      /* new group: discard whatever word state the previous one left behind */
+      acc->is_active = false;
+    }
+  else if (seed_from != NULL && !acc->is_active && DB_VALUE_DOMAIN_TYPE (seed_from) == DB_TYPE_NUMERIC
+	   && !DB_IS_NULL (seed_from))
+    {
+      if (numeric_sum_acc_add_value (acc, seed_from) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  return numeric_sum_acc_add_value (acc, value);
+}
+
+/*
+ * float_numeric_add_acc () - add a same-signed coefficient into a word accumulator
+ *                            and carry it upward (magnitude addition)
+ *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW when the sum outgrows the buffer
+ *   acc(in/out)   : active word accumulator, same sign as the value
+ *   val_p(in)     : the value's active words, val_used long
+ *   val_used(in)  : active word count of the value
+ *
+ * Note: A magnitude add is the common case in SUM. Only the value's active words
+ *       are added onto the accumulator's low words; the carry then rides upward
+ *       until it dies, which is far cheaper than touching all NUMERIC_SUM_ACC_WORDS
+ *       every row.
+ *
+ *       Unlike the fixed-precision binary operators, the accumulator has no
+ *       headroom to grow into -- it is a fixed 14-word buffer that a SUM keeps
+ *       filling -- so a carry out of the top word is a real overflow and must be
+ *       reported rather than rounded away.
+ */
+static int
+float_numeric_add_acc (NUMERIC_SUM_ACC * acc, const uint64_t * val_p, int val_used)
+{
+  unsigned char carry;
+  int p, new_used;
+
+  carry = float_numeric_add (&acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_p,
+			     &acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_used);
+
+  p = NUMERIC_SUM_ACC_WORDS - val_used - 1;
+  while (carry != 0 && p >= 0)
+    {
+      carry = _addcarry_u64 (carry, acc->words[p], 0, (unsigned long long *) &acc->words[p]);
+      p--;
+    }
+
+  if (carry != 0)
+    {
+      /* carry out of the full buffer: |sum| >= 2^896 (~10^269), beyond the
+       * representable range (10^254) where the legacy per-row path overflows
+       * even earlier; never round away silently */
+      TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
+
+      acc->is_active = false;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
+      return ER_IT_DATA_OVERFLOW;
+    }
+
+  /* O(1) update: a magnitude add never shrinks the window, and if the carry
+   * stopped at word (p + 1) that word is now nonzero */
+  new_used = MAX (acc->used_words, val_used);
+  if (NUMERIC_SUM_ACC_WORDS - (p + 1) > new_used)
+    {
+      new_used = NUMERIC_SUM_ACC_WORDS - (p + 1);
+    }
+  acc->used_words = new_used;
+
+  return NO_ERROR;
+}
+
+/*
+ * float_numeric_sub_acc () - subtract a staged coefficient of the opposite sign
+ *                            from a word accumulator (magnitude subtraction)
+ *   return: none -- a magnitude subtraction cannot overflow
+ *   acc(in/out)   : active word accumulator, opposite sign to the value
+ *   val_words(in) : full-width staging buffer holding the coefficient at its tail
+ *   val_used(in)  : active word count of the staged coefficient
+ *   val_win(in)   : how many tail words of val_words are already initialized
+ *   val_neg(in)   : sign of the value
+ *
+ * Note: Mixed signs are rare in SUM workloads. The larger magnitude is always the
+ *       minuend, so no borrow can leave the window and no headroom word is needed.
+ *       The result can shrink though, so the window has to be rescanned -- the
+ *       opposite of the O(1) update the add path gets.
+ */
+static void
+float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_win, bool val_neg)
+{
+  int win, top, i;
+
+  win = MAX (acc->used_words, val_used);
+  top = NUMERIC_SUM_ACC_WORDS - win;
+
+  /* the coefficient sits at the tail; zero only the window words above it */
+  if (win > val_win)
+    {
+      memset (&val_words[top], 0, (size_t) (win - val_win) * sizeof (uint64_t));
+    }
+
+  if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
+    {
+      (void) float_numeric_sub (&acc->words[top], &val_words[top], &acc->words[top], win);
+    }
+  else
+    {
+      (void) float_numeric_sub (&val_words[top], &acc->words[top], &acc->words[top], win);
+      acc->is_negative = val_neg;
+    }
+
+  /* the borrow can hollow out any prefix of the window, so rescan for the top word */
+  for (i = top; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
+    ;
+  acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
+
+  if (acc->used_words == 1 && acc->words[NUMERIC_SUM_ACC_WORDS - 1] == 0)
+    {
+      /* prevent -0; zero is always treated as positive */
+      acc->is_negative = false;
+    }
+}
+
+/*
  * numeric_sum_acc_add_core () - accumulate a coefficient staged in the tail of
  *                               a full-width word buffer into an active accumulator
  *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
@@ -4213,24 +4339,37 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
  *   val_used(in)  : active word count of the staged coefficient
  *   val_scale(in) : scale of the staged value
  *   val_neg(in)   : sign of the staged value
+ *
+ * Note: after aligning the scales this only picks a direction -- same sign goes to
+ *       float_numeric_add_acc (), mixed sign to float_numeric_sub_acc ().
  */
 static int
 numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_scale, bool val_neg)
 {
   const uint64_t *val_p;
-  int val_win, win, top, i, p, new_used, w;
-  unsigned char carry;
+  int val_win, w;
+  uint64_t carry = 0;
 
   val_p = &val_words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS];
   val_win = NUMERIC_AS_WORDS;
 
-  /* align scales; a no-op for fixed-scale columns */
+  /* Align scales; a no-op for fixed-scale columns.
+   *
+   * Unlike the binary operators, which size their buffer from the operand
+   * precisions and therefore cannot overflow it, this scales a fixed 14-word
+   * buffer.  A large enough scale gap shifts digits straight out of it, so the
+   * carry float_numeric_mul_normalize () reports has to be checked -- dropping it
+   * silently returns a wrong SUM (e.g. a 40-digit value meeting a scale-252 value
+   * needs 292 digits, well past the 270 the buffer holds). */
   if (val_scale > acc->scale)
     {
-      /* x10^k grows the value by exactly k decimal digits, so the new window
-       * is bounded from the shift itself -- no rescan needed */
-      float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words), val_scale - acc->scale);
-      acc->used_words += (val_scale - acc->scale) / 19 + 1;
+      /* x10^k grows the value by exactly k decimal digits, so the new window is
+       * bounded from the shift itself -- no rescan needed.  floor + 1 is an upper
+       * bound of the ceiling, which also covers a partially filled top word */
+      carry = float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words),
+					   val_scale - acc->scale);
+
+      acc->used_words += (val_scale - acc->scale) / NUMERIC_DIGITS_PER_WORD + 1;
       if (acc->used_words > NUMERIC_SUM_ACC_WORDS)
 	{
 	  acc->used_words = NUMERIC_SUM_ACC_WORDS;
@@ -4240,95 +4379,46 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
   else if (val_scale < acc->scale)
     {
       /* the value itself must be widened; stage it in a window just wide enough
-       * for the product (10^19 fits in one word, so the shift adds at most
-       * diff / 19 + 1 words) */
-      w = val_used + (acc->scale - val_scale) / 19 + 1;
+       * for the product (the shift adds at most diff / NUMERIC_DIGITS_PER_WORD + 1
+       * words, same bound as above) */
+      w = val_used + (acc->scale - val_scale) / NUMERIC_DIGITS_PER_WORD + 1;
       if (w < NUMERIC_AS_WORDS)
 	{
 	  w = NUMERIC_AS_WORDS;
 	}
       if (w > NUMERIC_SUM_ACC_WORDS)
 	{
+	  /* w is an upper bound, so exceeding the buffer does not yet mean the value
+	   * will not fit -- clamp and let the carry below decide */
 	  w = NUMERIC_SUM_ACC_WORDS;
 	}
       /* the coefficient is already in place at the tail; zero only the headroom */
       memset (&val_words[NUMERIC_SUM_ACC_WORDS - w], 0, (size_t) (w - NUMERIC_AS_WORDS) * sizeof (uint64_t));
-      float_numeric_mul_normalize (&val_words[NUMERIC_SUM_ACC_WORDS - w], w, w * (int) sizeof (uint64_t),
-				   acc->scale - val_scale);
+      carry = float_numeric_mul_normalize (&val_words[NUMERIC_SUM_ACC_WORDS - w], w, w * (int) sizeof (uint64_t),
+					   acc->scale - val_scale);
+
       /* w already bounds the widened value (val_used + shift words), reuse it */
       val_used = w;
       val_p = &val_words[NUMERIC_SUM_ACC_WORDS - w];
       val_win = w;
     }
 
+  if (carry != 0)
+    {
+      /* digits were shifted out of the buffer; never round them away silently */
+      TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
+
+      acc->is_active = false;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
+      return ER_IT_DATA_OVERFLOW;
+    }
+
   if (acc->is_negative == val_neg)
     {
-      /* same sign (the common case): add only the value's active words onto the
-       * accumulator's low words, then ride the carry upward until it dies */
-      carry = numeric_sum_acc_words_addsub (&acc->words[NUMERIC_SUM_ACC_WORDS - val_used],
-					    &val_p[val_win - val_used],
-					    &acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_used, false);
-      p = NUMERIC_SUM_ACC_WORDS - val_used - 1;
-      while (carry != 0 && p >= 0)
-	{
-	  carry = _addcarry_u64 (carry, acc->words[p], 0, (unsigned long long *) &acc->words[p]);
-	  p--;
-	}
-      if (carry != 0)
-	{
-	  /* carry out of the full buffer: |sum| >= 2^896 (~10^269), beyond the
-	   * representable range (10^254) where the legacy per-row path overflows
-	   * even earlier; never round away silently */
-	  TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
-
-	  acc->is_active = false;
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
-	  return ER_IT_DATA_OVERFLOW;
-	}
-
-      /* O(1) update: a magnitude add never shrinks the window, and if the carry
-       * stopped at word (p + 1) that word is now nonzero */
-      new_used = MAX (acc->used_words, val_used);
-      if (NUMERIC_SUM_ACC_WORDS - (p + 1) > new_used)
-	{
-	  new_used = NUMERIC_SUM_ACC_WORDS - (p + 1);
-	}
-      acc->used_words = new_used;
-      return NO_ERROR;
+      return float_numeric_add_acc (acc, &val_p[val_win - val_used], val_used);
     }
 
-  /* mixed sign (rare in SUM workloads): the value is already staged
-   * right-aligned in val_words; zero only the window words above it and
-   * reuse the symmetric windowed subtraction. A magnitude subtraction cannot
-   * grow past the larger operand, so no headroom word is needed */
-  win = MAX (acc->used_words, val_used);
-  top = NUMERIC_SUM_ACC_WORDS - win;
-
-  if (win > val_win)
-    {
-      memset (&val_words[top], 0, (size_t) (win - val_win) * sizeof (uint64_t));
-    }
-
-  if (float_numeric_operation_compare (&acc->words[top], &val_words[top], win) >= 0)
-    {
-      (void) numeric_sum_acc_words_addsub (&acc->words[top], &val_words[top], &acc->words[top], win, true);
-    }
-  else
-    {
-      (void) numeric_sum_acc_words_addsub (&val_words[top], &acc->words[top], &acc->words[top], win, true);
-      acc->is_negative = val_neg;
-    }
-
-  /* the borrow can hollow out any prefix of the window, so rescan for the top word */
-  for (i = top; i < NUMERIC_SUM_ACC_WORDS - 1 && acc->words[i] == 0; i++)
-    ;
-  acc->used_words = NUMERIC_SUM_ACC_WORDS - i;
-  if (acc->used_words == 1 && acc->words[NUMERIC_SUM_ACC_WORDS - 1] == 0)
-    {
-      /* prevent -0; zero is always treated as positive */
-      acc->is_negative = false;
-    }
-
+  float_numeric_sub_acc (acc, val_words, val_used, val_win, val_neg);
   return NO_ERROR;
 }
 
@@ -4336,10 +4426,17 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
  * numeric_sum_acc_add_u128 () - accumulate a 128-bit coefficient produced by the
  *                               fused word-domain expression chain (B2)
  *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
- *   acc(in/out)      : word accumulator; activated by the first value
+ *   acc(in/out)      : active word accumulator -- this never seeds one
  *   coeff(in)        : coefficient magnitude (< 10^38, guaranteed by the chain guard)
  *   scale(in)        : decimal scale of the value
  *   is_negative(in)  : sign of the value
+ *
+ * Note:
+ *   Unlike numeric_sum_acc_add_value (), this cannot start an accumulator: the chain
+ *   only runs once one is already live (qdata_evaluate_aggregate_list () tests
+ *   is_active before evaluating the argument tree), so the first value of a group is
+ *   always taken by add_value ().  Seeding here would also be wrong, since a chain
+ *   result carries no NUMERIC precision to derive used_words from.
  */
 int
 numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative)
@@ -4348,23 +4445,12 @@ numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, boo
   int val_used;
 
   assert (acc != NULL);
+  assert (acc->is_active);
 
   val_words[NUMERIC_SUM_ACC_WORDS - 3] = 0;
   val_words[NUMERIC_SUM_ACC_WORDS - 2] = (uint64_t) (coeff >> 64);
   val_words[NUMERIC_SUM_ACC_WORDS - 1] = (uint64_t) coeff;
   val_used = 1 + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 2] != 0);
-
-  if (!acc->is_active)
-    {
-      memset (acc->words, 0, sizeof (acc->words));
-      acc->words[NUMERIC_SUM_ACC_WORDS - 2] = val_words[NUMERIC_SUM_ACC_WORDS - 2];
-      acc->words[NUMERIC_SUM_ACC_WORDS - 1] = val_words[NUMERIC_SUM_ACC_WORDS - 1];
-      acc->scale = scale;
-      acc->is_negative = (is_negative && coeff != 0);
-      acc->used_words = val_used;
-      acc->is_active = true;
-      return NO_ERROR;
-    }
 
   return numeric_sum_acc_add_core (acc, val_words, val_used, scale, is_negative);
 }
@@ -4793,11 +4879,11 @@ float_numeric_db_value_mod (const DB_VALUE * value1, const DB_VALUE * value2, DB
   /* 6) scale adjustments */
   if (dividend_exponent > 0)
     {
-      float_numeric_mul_normalize (dividend_work, calc_words, calc_nbytes, dividend_exponent);
+      (void) float_numeric_mul_normalize (dividend_work, calc_words, calc_nbytes, dividend_exponent);
     }
   if (divisor_exponent > 0)
     {
-      float_numeric_mul_normalize (divisor_work, calc_words, calc_nbytes, divisor_exponent);
+      (void) float_numeric_mul_normalize (divisor_work, calc_words, calc_nbytes, divisor_exponent);
     }
 
   /* fast path */
@@ -5760,7 +5846,7 @@ numeric_coerce_num_to_num (const DB_VALUE * src_value, int src_prec, int src_sca
   if (scale_diff > 0)
     {
       /* increase scale: multiply by 10^delta. */
-      float_numeric_mul_normalize (result_word, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES, scale_diff);
+      (void) float_numeric_mul_normalize (result_word, NUMERIC_AS_WORDS, NUMERIC_AS_WORD_BYTES, scale_diff);
     }
   else if (scale_diff < 0)
     {
@@ -5833,9 +5919,9 @@ get_significant_digit (DB_BIGINT i)
  *   - Used for scale adjustment by shifting the decimal position right.
  *   - The multiplier must be a power of 10 that fits in a uint64_t.
  *   - Processes in 64-bit word chunks using __int128 for high performance.
- *   - Expects no overflow after multiplication (assert(carry == 0)).
+ *   - Returns the carry out of the buffer: nonzero means the product was truncated.
  */
-static void
+static uint64_t
 float_numeric_mul_pow10 (uint64_t * dbv_buf, int calc_words, int calc_bytes, uint64_t multiplier)
 {
   int i = 0;
@@ -5850,7 +5936,10 @@ float_numeric_mul_pow10 (uint64_t * dbv_buf, int calc_words, int calc_bytes, uin
       carry = res >> 64;
     }
 
-  assert (carry == 0);
+  /* Nonzero means the product did not fit the buffer.  Callers that size the buffer
+   * from the operand precisions cannot hit it and ignore the result; the SUM
+   * accumulator scales a fixed 14-word buffer and must report the overflow. */
+  return (uint64_t) carry;
 }
 
 /*
@@ -5871,23 +5960,32 @@ float_numeric_mul_pow10 (uint64_t * dbv_buf, int calc_words, int calc_bytes, uin
  *     - If k=19: Max temp ~ 2^64 * 10^19 ~ 1.84 * 10^38 -> SAFE.
  *     - If k=20: Max temp ~ 2^64 * 10^20 ~ 1.84 * 10^39 -> Potential overflow.
  *     ==> Safe chunk size is 19.
+ *
+ *  - returns the carry out of the buffer, like float_numeric_add ().  Callers that
+ *    size the buffer from the operand precisions cannot overflow it and discard the
+ *    result with (void); the SUM accumulator scales a fixed 14-word buffer with a
+ *    raw scale gap, so for it overflow is a real outcome to report.
+ *  - stops at the first chunk that carries: the buffer is already wrong from there.
  */
-static void
+static uint64_t
 float_numeric_mul_normalize (uint64_t * dbv_buf, int calc_words, int calc_bytes, int exponent)
 {
   int step = 0;
   uint64_t multiplier = 0;
+  uint64_t carry = 0;
 
   assert (exponent > 0);
 
-  while (exponent > 0)
+  while (exponent > 0 && carry == 0)
     {
-      step = (exponent > 19) ? 19 : exponent;
+      step = (exponent > NUMERIC_DIGITS_PER_WORD) ? NUMERIC_DIGITS_PER_WORD : exponent;
       multiplier = _gv_mul_normalize_pow10_lookup[step - 1];	// 10^step
 
-      float_numeric_mul_pow10 (dbv_buf, calc_words, calc_bytes, multiplier);
+      carry = float_numeric_mul_pow10 (dbv_buf, calc_words, calc_bytes, multiplier);
       exponent -= step;
     }
+
+  return carry;
 }
 
 /*
