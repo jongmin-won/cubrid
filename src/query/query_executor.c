@@ -1322,6 +1322,14 @@ qexec_end_one_iteration (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 		{
 		  GOTO_EXIT_ON_ERROR;
 		}
+
+	      if (xasl->proc.buildvalue.agg_domains_resolved)
+		{
+		  /* Sharing needs the accumulator domains, so it can only be decided
+		   * here -- mirrors the BUILDLIST path.  Runs once: the resolved flag
+		   * keeps this block from re-entering. */
+		  qdata_link_shared_accumulators (xasl->proc.buildvalue.agg_list);
+		}
 	    }
 
 	  bool is_desc_index = (xasl->curr_spec
@@ -15091,6 +15099,15 @@ qexec_end_buildvalueblock_iterations (THREAD_ENTRY * thread_p, XASL_NODE * xasl,
   BUILDVALUE_PROC_NODE *buildvalue = &xasl->proc.buildvalue;
 
   /* make final pass on aggregate list nodes */
+  /* A parallel BUILDVALUE resolves the accumulator domains inside the workers, so
+   * the main list was never linked for sharing -- link it here, after the merges
+   * filled the domains and before finalize's propagate reads the links.  On the
+   * serial path this recomputes the same links (idempotent, once per query). */
+  if (buildvalue->agg_list != NULL)
+    {
+      qdata_link_shared_accumulators (buildvalue->agg_list);
+    }
+
   if (buildvalue->agg_list && qdata_finalize_aggregate_list (thread_p, buildvalue->agg_list, false) != NO_ERROR)
     {
       GOTO_EXIT_ON_ERROR;
@@ -15946,9 +15963,12 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	  /* Flag the output expressions that exist only to feed an aggregate, so
 	   * that the word chain can pick them up. Done here, before any scan
 	   * starts and before parallel workers are spawned, so that the serial
-	   * path and every worker -- which inherits the regu flags -- agree. */
+	   * path and every worker -- which inherits the regu flags -- agree.
+	   *
+	   * Accumulator sharing is NOT linked here: the accumulator domains were
+	   * just reset above, so every aggregate would be rejected.  The linking
+	   * runs after the domains resolve, in qexec_end_one_iteration (). */
 	  qexec_mark_aggregate_operand_expressions (xasl);
-	  qdata_link_shared_accumulators (xasl->proc.buildlist.g_agg_list);
 
 	  if (xasl->proc.buildlist.a_eval_list)
 	    {

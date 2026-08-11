@@ -66,6 +66,17 @@ extern QPROC_TPLDESCR_STATUS qdata_generate_tuple_desc_for_valptr_list (THREAD_E
 extern int qdata_set_valptr_list_unbound (THREAD_ENTRY * thread_p, valptr_list_node * valptr_list, val_descr * vd);
 
 extern int qdata_add_dbval (DB_VALUE * dbval1, DB_VALUE * dbval2, DB_VALUE * res, tp_domain * domain_p);
+
+/* SUM/AVG accumulator entry points (POC): the type-dispatch point over the word
+ * (NUMERIC) mode and the typed (SHORT/INT/BIGINT/DOUBLE/FLOAT) mode */
+struct numeric_sum_acc;
+extern int qdata_sum_acc_accumulate (struct numeric_sum_acc *acc, bool is_first, const DB_VALUE * seed_from,
+				     const DB_VALUE * value);
+extern int qdata_sum_acc_add_typed (struct numeric_sum_acc *acc, const DB_VALUE * dbv);
+extern int qdata_sum_acc_merge (struct numeric_sum_acc *acc, const struct numeric_sum_acc *other);
+extern int qdata_sum_acc_snapshot (const struct numeric_sum_acc *acc, DB_VALUE * result);
+extern int qdata_sum_acc_finalize (struct numeric_sum_acc *acc, DB_VALUE * result);
+extern int qdata_sum_acc_flatten_for_spill (struct numeric_sum_acc *acc, DB_VALUE * result);
 extern int qdata_concatenate_dbval (THREAD_ENTRY * thread_p, DB_VALUE * dbval1, DB_VALUE * dbval2, DB_VALUE * res,
 				    tp_domain * domain, const int max_allowed_size, const char *warning_context);
 extern int qdata_increment_dbval (DB_VALUE * dbval1, DB_VALUE * res, int incval);

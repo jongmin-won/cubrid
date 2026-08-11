@@ -28,6 +28,7 @@
 #include "query_evaluator.h"
 #include "error_context.hpp"
 #include "query_executor.h"
+#include "query_aggregate.hpp"		/* qdata_link_shared_accumulators */
 #include "system.h"
 #include "xasl.h"
 #include "fetch.h"
@@ -1956,6 +1957,17 @@ namespace parallel_scan
 	  {
 	    qexec_resolve_domains_for_aggregation_for_parallel_heap_scan_g_agg (m_thread_p, m_xasl, m_vd,
 		&m_xasl->proc.buildlist.g_agg_domains_resolved);
+
+	    if (m_xasl->proc.buildlist.g_agg_domains_resolved)
+	      {
+		/* Sharing needs the accumulator domains, so it is decided right after they
+		 * resolve -- this is the main XASL's resolve point for a parallel BUILDLIST,
+		 * the counterpart of qexec_end_one_iteration () on the serial path.  Without
+		 * it the sort-based group-by that follows the gather runs unlinked.  Once
+		 * resolved there is nothing left to do here on later rows. */
+		qdata_link_shared_accumulators (m_xasl->proc.buildlist.g_agg_list);
+		m_g_agg_domain_resolve_need = false;
+	      }
 	  }
       }
     else if constexpr (result_type == RESULT_TYPE::XASL_SNAPSHOT)

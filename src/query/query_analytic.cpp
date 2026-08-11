@@ -65,7 +65,7 @@ qdata_analytic_numeric_sum_acc_enabled (void)
  * skips that block -- it must never reach a value that still needs it.  DISTINCT
  * is excluded because it accumulates through its own list file.
  */
-static bool
+static inline bool
 qdata_analytic_is_plain_sum_avg (const ANALYTIC_TYPE *func_p)
 {
   return ((func_p->function == PT_SUM || func_p->function == PT_AVG)
@@ -411,8 +411,14 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 	 * emitted as a rounded snapshot of the exact sum at each sort key group boundary
 	 * (qdata_finalize_analytic_func), so every emitted value is drift-free and the
 	 * last one matches the aggregate SUM. */
+	/* FLOAT stays legacy here, unlike the aggregate path: an analytic SUM/AVG
+	 * accumulates in its result domain, so a FLOAT argument really is summed
+	 * float-by-float -- rounded to float after every add, overflowing at
+	 * FLT_MAX mid-partition -- and only that reproduces it.  (The aggregate
+	 * path accumulates a FLOAT argument as DOUBLE; see qdata_sum_acc_*.) */
 	bool use_sum_acc = (qdata_analytic_numeric_sum_acc_enabled ()
-			     && DB_VALUE_DOMAIN_TYPE (&dbval) == DB_TYPE_NUMERIC);
+			     && NUMERIC_SUM_ACC_INPUT_OK (DB_VALUE_DOMAIN_TYPE (&dbval))
+			     && DB_VALUE_DOMAIN_TYPE (&dbval) != DB_TYPE_FLOAT);
 
 	if (func_p->curr_cnt < 1)
 	  {
@@ -446,6 +452,18 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 		    (func_p->function ==
 		     PT_AVG) ? (DB_TYPE) func_p->value->domain.general_info.type : TP_DOMAIN_TYPE (func_p->domain);
 
+	    if (func_p->num_sum_acc.is_active)
+	      {
+		/* a value the accumulator does not take arrived while it holds the running
+		 * sum -- func_p->value is not the sum in this mode, so adding there would be
+		 * silently discarded at the next snapshot.  The operand type is fixed per
+		 * query, so this is unreachable; guard it like the aggregate path does. */
+		assert (false);
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+		error = ER_FAILED;
+		goto exit;
+	      }
+
 	    result_domain = ((type == DB_TYPE_NUMERIC) ? NULL : func_p->domain);
 	    if (qdata_add_dbval (func_p->value, &dbval, func_p->value, result_domain) != NO_ERROR)
 	      {
@@ -465,8 +483,8 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 	 * state intact, so the accumulator is never actually found empty here -- defensive,
 	 * unlike the aggregate path where a spill really does strand the sum. */
 	if (use_sum_acc
-	    && numeric_sum_acc_accumulate (&func_p->num_sum_acc, func_p->curr_cnt < 1, func_p->value,
-					   &dbval) != NO_ERROR)
+	    && qdata_sum_acc_accumulate (&func_p->num_sum_acc, func_p->curr_cnt < 1, func_p->value,
+					 &dbval) != NO_ERROR)
 	  {
 	    error = ER_FAILED;
 	    goto exit;
@@ -1064,7 +1082,7 @@ qdata_finalize_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
    * state; this is the per-emission rounding point (rounding never feeds back). */
   if ((func_p->function == PT_SUM || func_p->function == PT_AVG) && func_p->num_sum_acc.is_active)
     {
-      if (numeric_sum_acc_snapshot (&func_p->num_sum_acc, func_p->value) != NO_ERROR)
+      if (qdata_sum_acc_snapshot (&func_p->num_sum_acc, func_p->value) != NO_ERROR)
 	{
 	  goto error;
 	}

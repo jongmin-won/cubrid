@@ -2731,6 +2731,324 @@ qdata_add_dbval (DB_VALUE * dbval1_p, DB_VALUE * dbval2_p, DB_VALUE * result_p, 
 }
 
 /*
+ * The qdata_sum_acc_* family: the SUM/AVG accumulator's single type-dispatch
+ * point (POC).
+ *
+ * A NUMERIC argument accumulates in the word accumulator (numeric_opfunc.c,
+ * which stays NUMERIC-only); SHORT/INTEGER/BIGINT/DOUBLE/FLOAT run in the
+ * accumulator's typed mode, implemented here because what a typed add must
+ * reproduce is qdata_add_dbval () above, minus the per-row DB_VALUE dispatch:
+ * the legacy path accumulates in the *input* type -- SUM (SHORT) really does
+ * overflow past 32767 -- so every typed add re-checks that type's range and
+ * raises the same ER_QPROC_OVERFLOW_ADDITION at the same row.  Integer adds
+ * are exact and double adds are the same IEEE operations in the same order,
+ * so results are bit-identical.  FLOAT accumulates as DOUBLE: that is the
+ * legacy accumulation domain (a sum may pass FLT_MAX mid-group and come back;
+ * only the final demotion to FLOAT can overflow).
+ */
+
+/*
+ * qdata_sum_acc_start_typed () - first value of a typed group
+ *   return: NO_ERROR, or ER_FAILED on a type the accumulator does not take
+ *   acc(in/out) : accumulator; becomes active in typed mode
+ *   dbv(in)     : first SHORT/INTEGER/BIGINT/DOUBLE/FLOAT value; not NULL-valued
+ */
+static int
+qdata_sum_acc_start_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
+{
+  DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (dbv);
+
+  switch (vtype)
+    {
+    case DB_TYPE_SHORT:
+      acc->int_sum = (int64_t) db_get_short (dbv);
+      break;
+    case DB_TYPE_INTEGER:
+      acc->int_sum = (int64_t) db_get_int (dbv);
+      break;
+    case DB_TYPE_BIGINT:
+      acc->int_sum = (int64_t) db_get_bigint (dbv);
+      break;
+    case DB_TYPE_DOUBLE:
+      acc->dbl_sum = db_get_double (dbv);
+      break;
+    case DB_TYPE_FLOAT:
+      acc->dbl_sum = (double) db_get_float (dbv);
+      break;
+    default:
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+
+  acc->kind = (unsigned char) numeric_sum_acc_kind_for (vtype);
+  acc->is_active = true;
+  return NO_ERROR;
+}
+
+/*
+ * qdata_sum_acc_add_typed () - add one value to an accumulator in typed mode
+ *   return: NO_ERROR, or ER_QPROC_OVERFLOW_ADDITION exactly where the legacy
+ *           per-row addition would have raised it
+ *   acc(in/out) : active accumulator in typed mode; kind matches the value's type
+ *   dbv(in)     : the value; not NULL-valued
+ */
+int
+qdata_sum_acc_add_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
+{
+  DB_TYPE vtype;
+
+  assert (acc != NULL && acc->is_active && dbv != NULL);
+
+  vtype = DB_VALUE_DOMAIN_TYPE (dbv);
+  assert (acc->kind == (unsigned char) numeric_sum_acc_kind_for (vtype));
+
+  switch (vtype)
+    {
+    case DB_TYPE_SHORT:
+      acc->int_sum += (int64_t) db_get_short (dbv);
+      if (acc->int_sum > DB_INT16_MAX || acc->int_sum < DB_INT16_MIN)
+	{
+	  goto overflow;
+	}
+      break;
+    case DB_TYPE_INTEGER:
+      acc->int_sum += (int64_t) db_get_int (dbv);
+      if (acc->int_sum > DB_INT32_MAX || acc->int_sum < DB_INT32_MIN)
+	{
+	  goto overflow;
+	}
+      break;
+    case DB_TYPE_BIGINT:
+      if (__builtin_add_overflow (acc->int_sum, (int64_t) db_get_bigint (dbv), &acc->int_sum))
+	{
+	  goto overflow;
+	}
+      break;
+    case DB_TYPE_DOUBLE:
+      acc->dbl_sum += db_get_double (dbv);
+      if (OR_CHECK_DOUBLE_OVERFLOW (acc->dbl_sum))
+	{
+	  goto overflow;
+	}
+      break;
+    case DB_TYPE_FLOAT:
+      /* same double add the legacy path runs; the demotion to FLOAT -- and its
+       * overflow -- happens once, at finalize */
+      acc->dbl_sum += (double) db_get_float (dbv);
+      if (OR_CHECK_DOUBLE_OVERFLOW (acc->dbl_sum))
+	{
+	  goto overflow;
+	}
+      break;
+    default:
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+
+  return NO_ERROR;
+
+overflow:
+  acc->is_active = false;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OVERFLOW_ADDITION, 0);
+  return ER_QPROC_OVERFLOW_ADDITION;
+}
+
+/*
+ * qdata_sum_acc_accumulate () - accumulate one value, dispatching on its type
+ *   return: NO_ERROR, or an error code
+ *   acc(in/out)   : the accumulator
+ *   is_first(in)  : true if value is the first one of the group; seed_from is
+ *                   then ignored
+ *   seed_from(in) : where the caller keeps its running value, or NULL.  A value
+ *                   found here while the accumulator is empty is a partial sum
+ *                   the accumulator does not have (a spilled hash entry comes
+ *                   back that way); fold it in first or it is lost
+ *   value(in)     : the value to accumulate; not NULL-valued
+ *
+ * Note: the type flips the guards below reject cannot happen in a planned
+ * query -- the operand type is fixed -- so they only defend against silent
+ * corruption, the same stance the NUMERIC-only path takes.
+ */
+int
+qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from, const DB_VALUE * value)
+{
+  DB_TYPE vtype;
+
+  assert (acc != NULL && value != NULL);
+
+  vtype = DB_VALUE_DOMAIN_TYPE (value);
+
+  if (vtype == DB_TYPE_NUMERIC)
+    {
+      return numeric_sum_acc_accumulate (acc, is_first, seed_from, value);
+    }
+
+  if (is_first)
+    {
+      acc->is_active = false;
+    }
+  else if (seed_from != NULL && !acc->is_active && !DB_IS_NULL (seed_from)
+	   && numeric_sum_acc_kind_for (DB_VALUE_DOMAIN_TYPE (seed_from)) != DB_TYPE_NULL)
+    {
+      if (qdata_sum_acc_start_typed (acc, seed_from) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  if (!acc->is_active)
+    {
+      return qdata_sum_acc_start_typed (acc, value);
+    }
+  if (acc->kind != (unsigned char) numeric_sum_acc_kind_for (vtype))
+    {
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+  return qdata_sum_acc_add_typed (acc, value);
+}
+
+/*
+ * qdata_sum_acc_merge () - merge one partial accumulator into another
+ *   return: NO_ERROR, or an error code
+ *   acc(in/out) : active destination accumulator
+ *   other(in)   : active source accumulator; left untouched
+ *
+ * Note: two partial sums of one aggregate share the operand type, so the
+ * kinds match; a typed merge re-checks the input type's range like every
+ * other add.  Word (NUMERIC) accumulators merge in the word domain.
+ */
+int
+qdata_sum_acc_merge (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
+{
+  assert (acc != NULL && acc->is_active);
+  assert (other != NULL && other->is_active);
+
+  if (acc->kind != other->kind)
+    {
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+
+  switch ((DB_TYPE) acc->kind)
+    {
+    case DB_TYPE_SHORT:
+      acc->int_sum += other->int_sum;
+      if (acc->int_sum > DB_INT16_MAX || acc->int_sum < DB_INT16_MIN)
+	{
+	  goto overflow;
+	}
+      return NO_ERROR;
+    case DB_TYPE_INTEGER:
+      acc->int_sum += other->int_sum;
+      if (acc->int_sum > DB_INT32_MAX || acc->int_sum < DB_INT32_MIN)
+	{
+	  goto overflow;
+	}
+      return NO_ERROR;
+    case DB_TYPE_BIGINT:
+      if (__builtin_add_overflow (acc->int_sum, other->int_sum, &acc->int_sum))
+	{
+	  goto overflow;
+	}
+      return NO_ERROR;
+    case DB_TYPE_DOUBLE:
+      acc->dbl_sum += other->dbl_sum;
+      if (OR_CHECK_DOUBLE_OVERFLOW (acc->dbl_sum))
+	{
+	  goto overflow;
+	}
+      return NO_ERROR;
+    default:
+      /* DB_TYPE_NULL: word (NUMERIC) mode */
+      return numeric_sum_acc_add_acc (acc, other);
+    }
+
+overflow:
+  acc->is_active = false;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OVERFLOW_ADDITION, 0);
+  return ER_QPROC_OVERFLOW_ADDITION;
+}
+
+/*
+ * qdata_sum_acc_snapshot () - write the accumulator's running sum into a DB_VALUE,
+ *                             keeping the accumulator live
+ *   return: NO_ERROR, or an error code
+ *   acc(in)     : active accumulator; NOT deactivated
+ *   result(out) : the running sum as a DB_VALUE
+ *
+ * Note: what cumulative analytic functions need -- they emit a running value per
+ * sort key group and keep accumulating afterwards.  A typed sum converts
+ * losslessly; the word (NUMERIC) mode rounds a copy, never the live state.
+ */
+int
+qdata_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+{
+  assert (acc != NULL && acc->is_active && result != NULL);
+
+  switch ((DB_TYPE) acc->kind)
+    {
+    case DB_TYPE_SHORT:
+      db_make_short (result, (short) acc->int_sum);
+      return NO_ERROR;
+    case DB_TYPE_INTEGER:
+      db_make_int (result, (int) acc->int_sum);
+      return NO_ERROR;
+    case DB_TYPE_BIGINT:
+      db_make_bigint (result, (DB_BIGINT) acc->int_sum);
+      return NO_ERROR;
+    case DB_TYPE_DOUBLE:
+      db_make_double (result, acc->dbl_sum);
+      return NO_ERROR;
+    default:
+      /* DB_TYPE_NULL: word (NUMERIC) mode */
+      return numeric_sum_acc_snapshot (acc, result);
+    }
+}
+
+/*
+ * qdata_sum_acc_finalize () - turn the accumulator into the running-sum DB_VALUE
+ *                             the legacy path would have been carrying
+ *   return: NO_ERROR, or an error code
+ *   acc(in/out) : active accumulator; deactivated on the way out
+ *   result(out) : the running sum as a DB_VALUE
+ *
+ * Note: a typed sum needs no rounding or packing, and its range was re-checked
+ * on every add, so the narrowing casts below cannot lose anything.  The word
+ * (NUMERIC) mode is where the single per-group rounding happens.
+ */
+int
+qdata_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+{
+  int ret = qdata_sum_acc_snapshot (acc, result);
+
+  acc->is_active = false;
+  return ret;
+}
+
+/*
+ * qdata_sum_acc_flatten_for_spill () - flatten the accumulator into its running
+ *                                      DB_VALUE on the way into a spill file
+ *   return: NO_ERROR, or an error code
+ *
+ * Note: same conversion as qdata_sum_acc_finalize (); the name marks the one
+ * caller where this happens mid-group.  A word (NUMERIC) accumulator does not
+ * fit a list file's columns, so the partial sum continues as a value -- an
+ * environmental demotion, not a property of the data: when the entry is
+ * reloaded, the accumulate seed path revives the exact state and accumulation
+ * resumes.  For a typed sum the conversion is lossless either way.
+ */
+int
+qdata_sum_acc_flatten_for_spill (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+{
+  return qdata_sum_acc_finalize (acc, result);
+}
+
+/*
  * qdata_concatenate_dbval () -
  *   return: NO_ERROR, or ER_code
  *   dbval1(in)		  : First db_value node

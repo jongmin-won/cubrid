@@ -1618,7 +1618,7 @@ namespace parallel_scan
 	 * its own accumulator; finalize_node () merges it through
 	 * qdata_aggregate_accumulator_to_accumulator (), which knows how to drain it.
 	 * acc->value still keeps the first value so its domain information survives. */
-	if (numeric_poc_gate_enabled () && DB_VALUE_DOMAIN_TYPE (db_value_p) == DB_TYPE_NUMERIC)
+	if (numeric_poc_gate_enabled () && NUMERIC_SUM_ACC_INPUT_OK (DB_VALUE_DOMAIN_TYPE (db_value_p)))
 	  {
 	    if (acc->curr_cnt < 1)
 	      {
@@ -1631,7 +1631,7 @@ namespace parallel_scan
 
 	    /* no seed source: this accumulator belongs to one worker and never leaves
 	     * memory, so acc->value can never hold a partial sum the words do not have */
-	    if (numeric_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, NULL, db_value_p) != NO_ERROR)
+	    if (qdata_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, NULL, db_value_p) != NO_ERROR)
 	      {
 		return false;
 	      }
@@ -2006,10 +2006,29 @@ namespace parallel_scan
 	  {
 	    return false;
 	  }
+
+	if (tl_xasl_p->proc.buildvalue.agg_domains_resolved)
+	  {
+	    /* Sharing needs the accumulator domains, so it is decided right after they
+	     * resolve -- the same spot the serial BUILDVALUE path and the parallel
+	     * BUILDLIST worker use.  This worker links its own list; rows a worker
+	     * accumulated into a sharer before this point (leading NULLs can delay the
+	     * resolve) are discarded when the main thread's propagate overwrites the
+	     * sharer with the owner's state, so they cost work but never correctness. */
+	    qdata_link_shared_accumulators (tl_xasl_p->proc.buildvalue.agg_list);
+	  }
       }
     for (AGGREGATE_TYPE *agg_node = tl_xasl_p->proc.buildvalue.agg_list; agg_node != NULL; agg_node = agg_node->next)
       {
 	AGGREGATE_ACCUMULATOR *acc = &agg_node->accumulator;
+
+	if (numeric_poc_gate_enabled () && acc->shared_from > 0)
+	  {
+	    /* an earlier aggregate accumulates this same sum; the state is copied from
+	     * it at finalize time (qdata_propagate_shared_accumulators ()).  skipping
+	     * here also skips the operand fetch below. */
+	    continue;
+	  }
 
 	if (agg_node->function == PT_COUNT_STAR)
 	  {

@@ -68,14 +68,64 @@ static int fetch_peek_min_max_value_of_width_bucket_func (THREAD_ENTRY * thread_
 							  val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl,
 							  DB_VALUE ** min, DB_VALUE ** max);
 
-static bool fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, int budget);
+/* The chain family an aggregate operand tree evaluates under, derived from the
+ * root's result domain.  The shape is validated per family once per query, at
+ * marking time; the run-time hook re-derives the family with one switch. */
+typedef enum
+{
+  FETCH_POC_CHAIN_NONE = 0,
+  FETCH_POC_CHAIN_NUMERIC,	/* {+,-,x} over NUMERIC; u128 coefficient registers */
+  FETCH_POC_CHAIN_INT,		/* SHORT/INTEGER/BIGINT nodes; int64 registers */
+  FETCH_POC_CHAIN_DOUBLE	/* DOUBLE nodes (FLOAT only as a leaf); double registers */
+} FETCH_POC_CHAIN_FAMILY;
+
+static FETCH_POC_CHAIN_FAMILY fetch_poc_chain_family (const REGU_VARIABLE * regu_var);
+static bool fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY family, int budget);
 static bool fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
 				  QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out);
+static bool fetch_poc_int_from_dbv (const DB_VALUE * dbv, int64_t * out);
+static bool fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
+				      OID * obj_oid, QFILE_TUPLE tpl, int64_t * out);
+static bool fetch_poc_dbl_from_dbv (const DB_VALUE * dbv, double *out);
+static bool fetch_poc_eval_dbl_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
+				      OID * obj_oid, QFILE_TUPLE tpl, double *out);
 
 static bool is_argument_wrapped_with_cast_op (const REGU_VARIABLE * regu_var);
 static int get_hour_minute_or_second (const DB_VALUE * datetime, OPERATOR_TYPE op_type, DB_VALUE * db_value);
 static int get_year_month_or_day (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
 static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
+
+/*
+ * fetch_poc_chain_family () - which chain family does this tree's result domain select?
+ *   return: the family, or FETCH_POC_CHAIN_NONE
+ *
+ * FLOAT selects no family of its own: the legacy path rounds a FLOAT operation's
+ * result to float at every step, and only float-by-float evaluation reproduces
+ * that.  A FLOAT *leaf* under a DOUBLE tree is fine -- the legacy operator widens
+ * it exactly once, which (double) does verbatim.
+ */
+static FETCH_POC_CHAIN_FAMILY
+fetch_poc_chain_family (const REGU_VARIABLE * regu_var)
+{
+  if (regu_var->domain == NULL)
+    {
+      return FETCH_POC_CHAIN_NONE;
+    }
+
+  switch (TP_DOMAIN_TYPE (regu_var->domain))
+    {
+    case DB_TYPE_NUMERIC:
+      return FETCH_POC_CHAIN_NUMERIC;
+    case DB_TYPE_SHORT:
+    case DB_TYPE_INTEGER:
+    case DB_TYPE_BIGINT:
+      return FETCH_POC_CHAIN_INT;
+    case DB_TYPE_DOUBLE:
+      return FETCH_POC_CHAIN_DOUBLE;
+    default:
+      return FETCH_POC_CHAIN_NONE;
+    }
+}
 
 /*
  * fetch_poc_chain_shape_ok () - can this expression tree be fused in the word domain?
@@ -98,17 +148,34 @@ static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VAL
 bool
 fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
 {
+  FETCH_POC_CHAIN_FAMILY family;
+  OPERATOR_TYPE op;
+
   /* The root has to be one of the fusable operators, not a cast: a lone cast has nothing
    * to fuse, and reaching the chain for it would only add a tree walk to what the general
    * path already does in one step. */
-  if (regu_var->type != TYPE_INARITH || regu_var->value.arithptr == NULL
-      || (regu_var->value.arithptr->opcode != T_ADD && regu_var->value.arithptr->opcode != T_SUB
-	  && regu_var->value.arithptr->opcode != T_MUL))
+  if (regu_var->type != TYPE_INARITH || regu_var->value.arithptr == NULL)
     {
       return false;
     }
 
-  return fetch_poc_chain_node_ok (regu_var, budget);
+  family = fetch_poc_chain_family (regu_var);
+  if (family == FETCH_POC_CHAIN_NONE)
+    {
+      return false;
+    }
+
+  /* division stays out of the NUMERIC family alone: its result scale and rounding
+   * rules cannot be reproduced without re-implementing the legacy operator.  An
+   * integer division truncates and a double division is one IEEE operation, so
+   * the typed families take T_DIV. */
+  op = regu_var->value.arithptr->opcode;
+  if (op != T_ADD && op != T_SUB && op != T_MUL && !(op == T_DIV && family != FETCH_POC_CHAIN_NUMERIC))
+    {
+      return false;
+    }
+
+  return fetch_poc_chain_node_ok (regu_var, family, budget);
 }
 
 /*
@@ -139,10 +206,10 @@ fetch_poc_chain_int_source (const REGU_VARIABLE * regu_var)
 
 /*
  * fetch_poc_chain_node_ok () - the recursive half of fetch_poc_chain_shape_ok ()
- *   return: true if this subtree can be fused
+ *   return: true if this subtree can be fused under the given family
  */
 static bool
-fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, int budget)
+fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY family, int budget)
 {
   const ARITH_TYPE *arithptr;
 
@@ -170,6 +237,48 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, int budget)
   if (arithptr == NULL)
     {
       return false;
+    }
+
+  if (family != FETCH_POC_CHAIN_NUMERIC)
+    {
+      /* Typed families evaluate every operation in the node's own result domain --
+       * an INT node overflows at int32 exactly like the legacy operator -- so each
+       * interior node has to carry a domain of its own family.  A FLOAT interior
+       * node would demand per-operation float rounding; it never appears under a
+       * DOUBLE root, and rejecting it here keeps that assumption checked. */
+      FETCH_POC_CHAIN_FAMILY node_family = fetch_poc_chain_family (regu_var);
+
+      if (arithptr->opcode == T_CAST_WRAP)
+	{
+	  /* the implicit widening wrap is absorbed: the evaluator reads the source
+	   * value and widens it itself, which is the entire cast.  An int widened
+	   * onto BIGINT or DOUBLE is exact the same way it is for NUMERIC below;
+	   * a FLOAT widened onto DOUBLE is one exact conversion. */
+	  if (arithptr->rightptr == NULL || node_family != family)
+	    {
+	      return false;
+	    }
+	  if (fetch_poc_chain_int_source (arithptr->rightptr))
+	    {
+	      return true;
+	    }
+	  return (family == FETCH_POC_CHAIN_DOUBLE && arithptr->rightptr->domain != NULL
+		  && (TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_FLOAT
+		      || TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_NUMERIC));
+	}
+
+      if (node_family != family)
+	{
+	  return false;
+	}
+      if (arithptr->leftptr == NULL || arithptr->rightptr == NULL
+	  || (arithptr->opcode != T_ADD && arithptr->opcode != T_SUB && arithptr->opcode != T_MUL
+	      && arithptr->opcode != T_DIV))
+	{
+	  return false;
+	}
+      return (fetch_poc_chain_node_ok (arithptr->leftptr, family, budget - 1)
+	      && fetch_poc_chain_node_ok (arithptr->rightptr, family, budget - 1));
     }
 
   if (arithptr->opcode == T_CAST_WRAP)
@@ -207,8 +316,8 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, int budget)
       return false;
     }
 
-  return (fetch_poc_chain_node_ok (arithptr->leftptr, budget - 1)
-	  && fetch_poc_chain_node_ok (arithptr->rightptr, budget - 1));
+  return (fetch_poc_chain_node_ok (arithptr->leftptr, family, budget - 1)
+	  && fetch_poc_chain_node_ok (arithptr->rightptr, family, budget - 1));
 }
 
 /*
@@ -275,6 +384,271 @@ fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_des
 }
 
 /*
+ * fetch_poc_int_from_dbv () - load an integer-family value into an int64 register
+ *   return: true, or false for a NULL or a non-integer (that row falls back)
+ */
+static bool
+fetch_poc_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
+{
+  if (dbv == NULL || DB_IS_NULL (dbv))
+    {
+      return false;
+    }
+
+  switch (DB_VALUE_DOMAIN_TYPE (dbv))
+    {
+    case DB_TYPE_SHORT:
+      *out = (int64_t) db_get_short (dbv);
+      return true;
+    case DB_TYPE_INTEGER:
+      *out = (int64_t) db_get_int (dbv);
+      return true;
+    case DB_TYPE_BIGINT:
+      *out = (int64_t) db_get_bigint (dbv);
+      return true;
+    default:
+      return false;
+    }
+}
+
+/*
+ * fetch_poc_eval_int_chain () - evaluate an integer {+,-,x,/} tree in int64 registers
+ *   return: true when the whole tree was fused, false to fall back
+ *   out(out): the root's value; already verified to fit the root's domain
+ *
+ * Every operation runs in the node's own result domain: the int64 register only
+ * carries it, and the width check after each operation is the same test the
+ * legacy operator turns into an overflow error -- so any row that would error
+ * falls back and gets that error from the legacy path.  Division truncates
+ * toward zero exactly like the legacy operator; a zero divisor and the one
+ * overflowing quotient (INT64_MIN / -1) fall back the same way.
+ */
+static bool
+fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+			  QFILE_TUPLE tpl, int64_t * out)
+{
+  ARITH_TYPE *arithptr;
+  int64_t left, right, result;
+
+  if (regu_var->type != TYPE_INARITH)
+    {
+      DB_VALUE *peek_leaf = NULL;
+
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, obj_oid, tpl, &peek_leaf) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_poc_int_from_dbv (peek_leaf, out);
+    }
+
+  arithptr = regu_var->value.arithptr;
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      DB_VALUE *peek_int = NULL;
+
+      /* the widening the wrap stands for happens in the register load itself */
+      if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_int) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_poc_int_from_dbv (peek_int, out);
+    }
+
+  if (!fetch_poc_eval_int_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_poc_eval_int_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+    {
+      return false;
+    }
+
+  switch (arithptr->opcode)
+    {
+    case T_ADD:
+      if (__builtin_add_overflow (left, right, &result))
+	{
+	  return false;
+	}
+      break;
+    case T_SUB:
+      if (__builtin_sub_overflow (left, right, &result))
+	{
+	  return false;
+	}
+      break;
+    case T_MUL:
+      if (__builtin_mul_overflow (left, right, &result))
+	{
+	  return false;
+	}
+      break;
+    case T_DIV:
+      if (right == 0 || (left == INT64_MIN && right == -1))
+	{
+	  return false;
+	}
+      result = left / right;
+      break;
+    default:
+      return false;
+    }
+
+  /* the node computes in its own width; outgrowing it is what the legacy
+   * operator raises an error for */
+  switch (TP_DOMAIN_TYPE (regu_var->domain))
+    {
+    case DB_TYPE_SHORT:
+      if (result > DB_INT16_MAX || result < DB_INT16_MIN)
+	{
+	  return false;
+	}
+      break;
+    case DB_TYPE_INTEGER:
+      if (result > DB_INT32_MAX || result < DB_INT32_MIN)
+	{
+	  return false;
+	}
+      break;
+    default:
+      break;			/* BIGINT: the checked operation was the width test */
+    }
+
+  *out = result;
+  return true;
+}
+
+/*
+ * fetch_poc_dbl_from_dbv () - load a value into a double register
+ *   return: true, or false for a NULL or an unsupported type (that row falls back)
+ *
+ * An integer or FLOAT leaf widens exactly the way the legacy path widens it --
+ * one C conversion -- whether type checking wrapped it or passes it to the
+ * operator raw.
+ */
+static bool
+fetch_poc_dbl_from_dbv (const DB_VALUE * dbv, double *out)
+{
+  if (dbv == NULL || DB_IS_NULL (dbv))
+    {
+      return false;
+    }
+
+  switch (DB_VALUE_DOMAIN_TYPE (dbv))
+    {
+    case DB_TYPE_DOUBLE:
+      *out = db_get_double (dbv);
+      return true;
+    case DB_TYPE_FLOAT:
+      *out = (double) db_get_float (dbv);
+      return true;
+    case DB_TYPE_SHORT:
+      *out = (double) db_get_short (dbv);
+      return true;
+    case DB_TYPE_INTEGER:
+      *out = (double) db_get_int (dbv);
+      return true;
+    case DB_TYPE_BIGINT:
+      *out = (double) db_get_bigint (dbv);
+      return true;
+    case DB_TYPE_NUMERIC:
+      {
+	double adouble;
+
+	/* the same conversion the legacy cast runs (numeric_db_value_coerce_from_num,
+	 * DB_TYPE_DOUBLE case), so the register holds the identical bits */
+	numeric_coerce_num_to_double (dbv, db_get_numeric_scale (dbv, NULL), &adouble);
+	if (OR_CHECK_DOUBLE_OVERFLOW (adouble))
+	  {
+	    /* the legacy cast raises ER_IT_DATA_OVERFLOW here; fall back so it does */
+	    return false;
+	  }
+	*out = adouble;
+	return true;
+      }
+    default:
+      return false;
+    }
+}
+
+/*
+ * fetch_poc_eval_dbl_chain () - evaluate a DOUBLE {+,-,x,/} tree in double registers
+ *   return: true when the whole tree was fused, false to fall back
+ *   out(out): the root's value; finite
+ *
+ * Each operation is the same IEEE operation the legacy operator runs, in the
+ * same order, so results are bit-identical.  The overflow test after each
+ * operation is the legacy operator's own (OR_CHECK_DOUBLE_OVERFLOW); a row
+ * that trips it falls back and gets the error from the legacy path, and so
+ * does a zero divisor.
+ */
+static bool
+fetch_poc_eval_dbl_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+			  QFILE_TUPLE tpl, double *out)
+{
+  ARITH_TYPE *arithptr;
+  double left, right, result;
+
+  if (regu_var->type != TYPE_INARITH)
+    {
+      DB_VALUE *peek_leaf = NULL;
+
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, obj_oid, tpl, &peek_leaf) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_poc_dbl_from_dbv (peek_leaf, out);
+    }
+
+  arithptr = regu_var->value.arithptr;
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      DB_VALUE *peek_src = NULL;
+
+      if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_src) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_poc_dbl_from_dbv (peek_src, out);
+    }
+
+  if (!fetch_poc_eval_dbl_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_poc_eval_dbl_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+    {
+      return false;
+    }
+
+  switch (arithptr->opcode)
+    {
+    case T_ADD:
+      result = left + right;
+      break;
+    case T_SUB:
+      result = left - right;
+      break;
+    case T_MUL:
+      result = left * right;
+      break;
+    case T_DIV:
+      if (right == 0.0)
+	{
+	  return false;
+	}
+      result = left / right;
+      break;
+    default:
+      return false;
+    }
+
+  if (OR_CHECK_DOUBLE_OVERFLOW (result))
+    {
+      return false;
+    }
+
+  *out = result;
+  return true;
+}
+
+/*
  * fetch_peek_arith () -
  *   return: NO_ERROR or ER_code
  *   regu_var(in/out): Regulator Variable of an ARITH node.
@@ -326,11 +700,65 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
    * A NULL result domain is left to the general path, which returns without
    * touching the result in that case. */
   if (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_AGG_OPERAND)
-      && !(regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NULL))
+      && regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) != DB_TYPE_NULL)
     {
-      NUMERIC_POC_CHAIN_VAL chain_val;
+      bool fused = false;
 
-      if (fetch_poc_eval_chain (thread_p, regu_var, vd, obj_oid, tpl, &chain_val))
+      switch (fetch_poc_chain_family (regu_var))
+	{
+	case FETCH_POC_CHAIN_NUMERIC:
+	  {
+	    NUMERIC_POC_CHAIN_VAL chain_val;
+
+	    if (fetch_poc_eval_chain (thread_p, regu_var, vd, obj_oid, tpl, &chain_val))
+	      {
+		numeric_poc_chain_to_dbv (&chain_val, arithptr->value);
+		fused = true;
+	      }
+	  }
+	  break;
+
+	case FETCH_POC_CHAIN_INT:
+	  {
+	    int64_t int_val;
+
+	    if (fetch_poc_eval_int_chain (thread_p, regu_var, vd, obj_oid, tpl, &int_val))
+	      {
+		/* the evaluator verified the value fits the root's domain */
+		switch (TP_DOMAIN_TYPE (regu_var->domain))
+		  {
+		  case DB_TYPE_SHORT:
+		    db_make_short (arithptr->value, (short) int_val);
+		    break;
+		  case DB_TYPE_INTEGER:
+		    db_make_int (arithptr->value, (int) int_val);
+		    break;
+		  default:
+		    db_make_bigint (arithptr->value, (DB_BIGINT) int_val);
+		    break;
+		  }
+		fused = true;
+	      }
+	  }
+	  break;
+
+	case FETCH_POC_CHAIN_DOUBLE:
+	  {
+	    double dbl_val;
+
+	    if (fetch_poc_eval_dbl_chain (thread_p, regu_var, vd, obj_oid, tpl, &dbl_val))
+	      {
+		db_make_double (arithptr->value, dbl_val);
+		fused = true;
+	      }
+	  }
+	  break;
+
+	default:
+	  break;
+	}
+
+      if (fused)
 	{
 	  /* returning early skips the constness decision this function makes at its
 	   * end, and the caller asserts that one of the two flags is set.  Mark it
@@ -340,7 +768,6 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 	  REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
 	  assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
 
-	  numeric_poc_chain_to_dbv (&chain_val, arithptr->value);
 	  *peek_dbval = arithptr->value;
 
 	  return NO_ERROR;

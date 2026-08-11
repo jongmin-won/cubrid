@@ -311,6 +311,17 @@ static void numeric_bytes_to_words (const uint8_t * src, int src_bytes, uint64_t
 static void numeric_words_to_bytes (const uint64_t * src, int src_words, uint8_t * dest);
 static int numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used, int val_scale,
 				     bool val_neg);
+static void numeric_sum_acc_load_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv);
+static void numeric_poc_chain_from_u128 (uint128_t coeff, int scale, bool is_negative, NUMERIC_POC_CHAIN_VAL * out);
+static int numeric_sum_acc_add_rounded (NUMERIC_SUM_ACC * acc, const DB_VALUE * val_dbv);
+
+/* Private status between the accumulator helpers, never seen by callers: the
+ * exact sum would outgrow the 14-word buffer.  The accumulator is untouched --
+ * every detection is either a pre-check or on a staged copy -- and the caller
+ * of numeric_sum_acc_add_core () absorbs the pending value with one
+ * legacy-rounded add (numeric_sum_acc_add_rounded ()), after which exact word
+ * accumulation simply resumes.  Positive so it can never collide with an error. */
+#define NUMERIC_SUM_ACC_CAPACITY (1)
 
 /*
  * numeric_is_negative () -
@@ -4114,8 +4125,84 @@ float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_buf, int prec
 }
 
 /*
+ * numeric_sum_acc_load_value () - load a NUMERIC value as the whole accumulator state
+ *   acc(in/out) : word accumulator; overwritten and activated
+ *   dbv(in)     : NUMERIC value to load
+ *
+ * Used for the first value of a group and to reload the result of a
+ * legacy-rounded add (numeric_sum_acc_add_rounded ()).
+ */
+static void
+numeric_sum_acc_load_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
+{
+  int prec, scale;
+
+  db_get_numeric_precision_and_scale (dbv, &prec, &scale, NULL);
+
+  memset (acc->words, 0, sizeof (acc->words));
+  numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
+			  &acc->words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
+			  NUMERIC_AS_WORD_BYTES);
+  acc->scale = scale;
+  acc->is_negative = numeric_is_negative (dbv);
+  /* the header precision upper-bounds the stored digits (exact for float
+   * NUMERIC, declared for fixed columns), so the active word count follows
+   * from it through the engine's precision-to-bytes lookup */
+  acc->used_words = NUMERIC_GET_WORD_COUNT (_gv_numeric_precision_to_bytes_lookup[prec]);
+  assert (acc->used_words >= 1 && acc->used_words <= NUMERIC_AS_WORDS);
+  acc->kind = (unsigned char) DB_TYPE_NULL;	/* word (NUMERIC) mode */
+  acc->is_active = true;
+}
+
+/*
+ * numeric_sum_acc_add_rounded () - absorb a value the exact path could not take,
+ *                                  with one legacy-rounded add
+ *   return: NO_ERROR, or the error float_numeric_db_value_add () raises when even
+ *           the rounded sum is not representable (integer part past the scale
+ *           floor) -- the same error, from the same check, as the legacy path
+ *   acc(in/out)  : active word accumulator; holds the rounded running sum after
+ *   val_dbv(in)  : the pending NUMERIC value
+ *
+ * The exact sum of the running words and this value does not fit the buffer
+ * (typically a scale gap: 39 digits plus a scale-252 value span 291 digits).
+ * Shrinking the partial cannot help -- the gap, not the partial, sets the width
+ * -- so this one addition is performed the way the legacy path performs every
+ * addition: through float_numeric_db_value_add (), which rounds the result to
+ * DB_MAX_NUMERIC_PRECISION digits.  The rounded sum is then reloaded into the
+ * words and exact accumulation resumes with the next value.  Rows that keep
+ * hitting this path reproduce the legacy rounding sequence bit for bit.
+ */
+static int
+numeric_sum_acc_add_rounded (NUMERIC_SUM_ACC * acc, const DB_VALUE * val_dbv)
+{
+  DB_VALUE partial, rounded;
+  int ret;
+
+  db_make_null (&partial);
+  db_make_null (&rounded);
+
+  ret = numeric_sum_acc_snapshot (acc, &partial);
+  if (ret == NO_ERROR)
+    {
+      ret = float_numeric_db_value_add (&partial, val_dbv, &rounded);
+    }
+
+  if (ret != NO_ERROR)
+    {
+      /* er_set was done inside; the query fails with the legacy message */
+      acc->is_active = false;
+      return ret;
+    }
+
+  numeric_sum_acc_load_value (acc, &rounded);
+  return NO_ERROR;
+}
+
+/*
  * numeric_sum_acc_add_value () - accumulate a NUMERIC value into a word-based SUM/AVG accumulator
- *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW when the running sum outgrows the word buffer
+ *   return: NO_ERROR, or an error code.  A value the exact path cannot take
+ *           (buffer capacity) is absorbed internally with one legacy-rounded
+ *           add -- the caller never sees it
  *   acc(in/out) : word accumulator; activated by the first accumulated value
  *   dbv(in)     : NUMERIC value to accumulate
  *
@@ -4131,7 +4218,7 @@ int
 numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
 {
   uint64_t val_words[NUMERIC_SUM_ACC_WORDS];	/* staging; only the words actually used are ever written */
-  int val_prec, val_scale, val_used;
+  int val_prec, val_scale, val_used, ret;
   bool val_neg;
 
   assert (acc != NULL && dbv != NULL);
@@ -4143,16 +4230,7 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   if (!acc->is_active)
     {
       /* first value: load it as the initial accumulator state */
-      memset (acc->words, 0, sizeof (acc->words));
-      numeric_bytes_to_words (db_locate_numeric (dbv), DB_NUMERIC_BUF_SIZE,
-			      &acc->words[NUMERIC_SUM_ACC_WORDS - NUMERIC_AS_WORDS], NUMERIC_AS_WORDS,
-			      NUMERIC_AS_WORD_BYTES);
-      acc->scale = val_scale;
-      acc->is_negative = val_neg;
-      /* precision upper-bounds the stored digits; see the load path below */
-      acc->used_words = NUMERIC_GET_WORD_COUNT (_gv_numeric_precision_to_bytes_lookup[val_prec]);
-      assert (acc->used_words >= 1 && acc->used_words <= NUMERIC_AS_WORDS);
-      acc->is_active = true;
+      numeric_sum_acc_load_value (acc, dbv);
       return NO_ERROR;
     }
 
@@ -4170,12 +4248,18 @@ numeric_sum_acc_add_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   assert (val_used >= 1 + (int) ((val_words[NUMERIC_SUM_ACC_WORDS - 3] | val_words[NUMERIC_SUM_ACC_WORDS - 2]) != 0)
 	  + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 3] != 0));
 
-  return numeric_sum_acc_add_core (acc, val_words, val_used, val_scale, val_neg);
+  ret = numeric_sum_acc_add_core (acc, val_words, val_used, val_scale, val_neg);
+  if (ret == NUMERIC_SUM_ACC_CAPACITY)
+    {
+      return numeric_sum_acc_add_rounded (acc, dbv);
+    }
+  return ret;
 }
 
 /*
  * numeric_sum_acc_add_acc () - merge one word accumulator into another
- *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW when the merged sum outgrows the buffer
+ *   return: NO_ERROR, or an error code.  A merge the exact path cannot take
+ *           (buffer capacity) rounds the source once and absorbs it internally
  *   acc(in/out) : active destination accumulator
  *   other(in)   : active source accumulator; left untouched
  *
@@ -4194,15 +4278,33 @@ int
 numeric_sum_acc_add_acc (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
 {
   uint64_t val_words[NUMERIC_SUM_ACC_WORDS];
+  int ret;
 
   assert (acc != NULL && acc->is_active);
   assert (other != NULL && other->is_active);
+  assert (acc->kind == (unsigned char) DB_TYPE_NULL && other->kind == (unsigned char) DB_TYPE_NULL);
   assert (other->used_words >= 1 && other->used_words <= NUMERIC_SUM_ACC_WORDS);
 
   /* numeric_sum_acc_add_core () normalizes the value in place, so it gets its own copy */
   memcpy (val_words, other->words, sizeof (val_words));
 
-  return numeric_sum_acc_add_core (acc, val_words, other->used_words, other->scale, other->is_negative);
+  ret = numeric_sum_acc_add_core (acc, val_words, other->used_words, other->scale, other->is_negative);
+  if (ret == NUMERIC_SUM_ACC_CAPACITY)
+    {
+      /* the exact merge does not fit: round the source once -- what feeding it
+       * back through a spill file would have done anyway -- and absorb it */
+      DB_VALUE other_dbv;
+
+      db_make_null (&other_dbv);
+      ret = numeric_sum_acc_snapshot (other, &other_dbv);
+      if (ret != NO_ERROR)
+	{
+	  acc->is_active = false;
+	  return ret;
+	}
+      return numeric_sum_acc_add_rounded (acc, &other_dbv);
+    }
+  return ret;
 }
 
 /*
@@ -4239,6 +4341,15 @@ numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE
       /* new group: discard whatever word state the previous one left behind */
       acc->is_active = false;
     }
+  else if (acc->is_active && acc->kind != (unsigned char) DB_TYPE_NULL)
+    {
+      /* a NUMERIC value while the running sum is typed (qdata_sum_acc_* owns that
+       * mode): the operand type is fixed per query, so this is unreachable --
+       * guard it rather than corrupt silently */
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
   else if (seed_from != NULL && !acc->is_active && DB_VALUE_DOMAIN_TYPE (seed_from) == DB_TYPE_NUMERIC
 	   && !DB_IS_NULL (seed_from))
     {
@@ -4254,7 +4365,8 @@ numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE
 /*
  * float_numeric_add_acc () - add a same-signed coefficient into a word accumulator
  *                            and carry it upward (magnitude addition)
- *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW when the sum outgrows the buffer
+ *   return: NO_ERROR, or NUMERIC_SUM_ACC_CAPACITY when the sum would outgrow
+ *           the buffer (checked BEFORE adding; the accumulator is untouched)
  *   acc(in/out)   : active word accumulator, same sign as the value
  *   val_p(in)     : the value's active words, val_used long
  *   val_used(in)  : active word count of the value
@@ -4264,16 +4376,40 @@ numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE
  *       until it dies, which is far cheaper than touching all NUMERIC_SUM_ACC_WORDS
  *       every row.
  *
- *       Unlike the fixed-precision binary operators, the accumulator has no
- *       headroom to grow into -- it is a fixed 14-word buffer that a SUM keeps
- *       filling -- so a carry out of the top word is a real overflow and must be
- *       reported rather than rounded away.
+ *       Overflow (sum >= 2^896) is decided before the add, so the accumulator is
+ *       never modified on the capacity path.  The test is acc > ~val: when the
+ *       value spans fewer than all words, ~val's top words are all-ones, so the
+ *       necessary condition collapses to acc->words[0] == UINT64_MAX -- normal
+ *       rows are cleared by one predictable branch, and the full word-by-word
+ *       compare runs only when the accumulator sits within one word of the
+ *       ceiling or the value spans the whole buffer.
  */
 static int
 float_numeric_add_acc (NUMERIC_SUM_ACC * acc, const uint64_t * val_p, int val_used)
 {
   unsigned char carry;
   int p, new_used;
+
+  if (val_used == NUMERIC_SUM_ACC_WORDS || acc->words[0] == UINT64_MAX)
+    {
+      /* suspicious region: decide exactly, against the bitwise complement */
+      int i, top = NUMERIC_SUM_ACC_WORDS - val_used;
+
+      for (i = 0; i < NUMERIC_SUM_ACC_WORDS; i++)
+	{
+	  uint64_t not_val = (i < top) ? UINT64_MAX : ~val_p[i - top];
+
+	  if (acc->words[i] != not_val)
+	    {
+	      if (acc->words[i] > not_val)
+		{
+		  return NUMERIC_SUM_ACC_CAPACITY;	/* acc + val >= 2^896 */
+		}
+	      break;		/* acc < ~val: the sum fits */
+	    }
+	}
+      /* acc == ~val falls through: the sum is exactly 2^896 - 1, which fits */
+    }
 
   carry = float_numeric_add (&acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_p,
 			     &acc->words[NUMERIC_SUM_ACC_WORDS - val_used], val_used);
@@ -4285,17 +4421,8 @@ float_numeric_add_acc (NUMERIC_SUM_ACC * acc, const uint64_t * val_p, int val_us
       p--;
     }
 
-  if (carry != 0)
-    {
-      /* carry out of the full buffer: |sum| >= 2^896 (~10^269), beyond the
-       * representable range (10^254) where the legacy per-row path overflows
-       * even earlier; never round away silently */
-      TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
-
-      acc->is_active = false;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
-      return ER_IT_DATA_OVERFLOW;
-    }
+  /* the pre-check proved acc <= ~val, i.e. acc + val <= 2^896 - 1 */
+  assert (carry == 0);
 
   /* O(1) update: a magnitude add never shrinks the window, and if the carry
    * stopped at word (p + 1) that word is now nonzero */
@@ -4363,7 +4490,7 @@ float_numeric_sub_acc (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_used
 /*
  * numeric_sum_acc_add_core () - accumulate a coefficient staged in the tail of
  *                               a full-width word buffer into an active accumulator
- *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
+ *   return: NO_ERROR, or NUMERIC_SUM_ACC_CAPACITY (accumulator left intact)
  *   acc(in/out)   : active word accumulator
  *   val_words(in) : full-width staging buffer; the low val_used words hold the
  *                   coefficient, the ones above it are scratch this function writes
@@ -4394,23 +4521,33 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
    *
    * Unlike the binary operators, which size their buffer from the operand
    * precisions and therefore cannot overflow it, this scales a fixed 14-word
-   * buffer.  A large enough scale gap shifts digits straight out of it, so the
-   * carry float_numeric_mul_normalize () reports has to be checked -- dropping it
-   * silently returns a wrong SUM (e.g. a 40-digit value meeting a scale-252 value
-   * needs 292 digits, well past the 270 the buffer holds). */
+   * buffer.  A large enough scale gap shifts digits straight out of it (e.g. a
+   * 40-digit value meeting a scale-252 value needs 292 digits, well past the
+   * ~269 the buffer holds).  That is a working-buffer limit, not a value limit,
+   * so it is answered with NUMERIC_SUM_ACC_CAPACITY -- accumulator intact, for
+   * the caller to flatten -- never with an overflow error the legacy path would
+   * not have raised. */
   if (val_scale > acc->scale)
     {
       /* x10^k grows the value by exactly k decimal digits, so the new window is
        * bounded from the shift itself -- no rescan needed.  floor + 1 is an upper
        * bound of the ceiling, which also covers a partially filled top word */
-      carry = float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words),
-					   val_scale - acc->scale);
+      int grow_words = (val_scale - acc->scale) / NUMERIC_DIGITS_PER_WORD + 1;
 
-      acc->used_words += (val_scale - acc->scale) / NUMERIC_DIGITS_PER_WORD + 1;
-      if (acc->used_words > NUMERIC_SUM_ACC_WORDS)
+      if (acc->used_words + grow_words > NUMERIC_SUM_ACC_WORDS)
 	{
-	  acc->used_words = NUMERIC_SUM_ACC_WORDS;
+	  /* checked BEFORE multiplying, because the in-place multiply cannot be
+	   * undone once digits fall off the top.  the bound passing also proves
+	   * the multiply below cannot carry.  conservative by up to one word
+	   * (used_words is itself an upper bound) -- a fallback taken one value
+	   * early is still exact, just legacy-rounded from here on */
+	  return NUMERIC_SUM_ACC_CAPACITY;
 	}
+
+      (void) float_numeric_mul_normalize (acc->words, NUMERIC_SUM_ACC_WORDS, sizeof (acc->words),
+					  val_scale - acc->scale);
+
+      acc->used_words += grow_words;
       acc->scale = val_scale;
     }
   else if (val_scale < acc->scale)
@@ -4443,12 +4580,9 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
 
   if (carry != 0)
     {
-      /* digits were shifted out of the buffer; never round them away silently */
-      TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_NUMERIC);
-
-      acc->is_active = false;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, pr_type_name (TP_DOMAIN_TYPE (domain)));
-      return ER_IT_DATA_OVERFLOW;
+      /* the staged copy of the value overflowed its clamped window; the
+       * accumulator itself was not touched, so this is a clean fallback */
+      return NUMERIC_SUM_ACC_CAPACITY;
     }
 
   if (acc->is_negative == val_neg)
@@ -4463,7 +4597,8 @@ numeric_sum_acc_add_core (NUMERIC_SUM_ACC * acc, uint64_t * val_words, int val_u
 /*
  * numeric_sum_acc_add_u128 () - accumulate a 128-bit coefficient produced by the
  *                               fused word-domain expression chain (B2)
- *   return: NO_ERROR, or ER_IT_DATA_OVERFLOW
+ *   return: NO_ERROR, or an error code.  Capacity is absorbed internally with
+ *           one legacy-rounded add, like numeric_sum_acc_add_value ()
  *   acc(in/out)      : active word accumulator -- this never seeds one
  *   coeff(in)        : coefficient magnitude (< 10^38, guaranteed by the chain guard)
  *   scale(in)        : decimal scale of the value
@@ -4480,7 +4615,7 @@ int
 numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative)
 {
   uint64_t val_words[NUMERIC_SUM_ACC_WORDS];
-  int val_used;
+  int val_used, ret;
 
   assert (acc != NULL);
   assert (acc->is_active);
@@ -4490,7 +4625,18 @@ numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, boo
   val_words[NUMERIC_SUM_ACC_WORDS - 1] = (uint64_t) coeff;
   val_used = 1 + (int) (val_words[NUMERIC_SUM_ACC_WORDS - 2] != 0);
 
-  return numeric_sum_acc_add_core (acc, val_words, val_used, scale, is_negative);
+  ret = numeric_sum_acc_add_core (acc, val_words, val_used, scale, is_negative);
+  if (ret == NUMERIC_SUM_ACC_CAPACITY)
+    {
+      /* pack the chain value once and absorb it with one legacy-rounded add */
+      NUMERIC_POC_CHAIN_VAL cv;
+      DB_VALUE val_dbv;
+
+      numeric_poc_chain_from_u128 (coeff, scale, is_negative, &cv);
+      numeric_poc_chain_to_dbv (&cv, &val_dbv);
+      return numeric_sum_acc_add_rounded (acc, &val_dbv);
+    }
+  return ret;
 }
 
 /*
@@ -4756,7 +4902,7 @@ numeric_poc_chain_to_dbv (const NUMERIC_POC_CHAIN_VAL * cv, DB_VALUE * answer)
  *     sort key group and keep accumulating afterwards.
  */
 int
-numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+numeric_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result)
 {
   uint64_t work[NUMERIC_SUM_ACC_WORDS];
   uint8_t result_buf[DB_NUMERIC_BUF_SIZE];
@@ -4765,6 +4911,7 @@ numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
   bool is_negative;
 
   assert (acc != NULL && acc->is_active && result != NULL);
+  assert (acc->kind == (unsigned char) DB_TYPE_NULL);	/* typed sums live in qdata_sum_acc_* */
 
   /* the window must span at least NUMERIC_AS_WORDS words: numeric_words_to_bytes ()
    * computes its word pointer as src + (src_words - NUMERIC_AS_WORDS) and would read
@@ -4828,6 +4975,8 @@ numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
   acc->is_active = false;
   return ret;
 }
+
+
 
 /*
  * numeric_coerce_num_to_double () -

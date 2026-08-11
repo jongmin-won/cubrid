@@ -220,8 +220,12 @@ qdata_initialize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_
     {
 
       agg_p->is_ended = false;
-      /* accumulator sharing is decided once the accumulator domains are known */
-      agg_p->accumulator.shared_from = 0;
+      /* accumulator.shared_from is NOT reset here: it is derived from the query
+       * shape once the domains resolve (qdata_link_shared_accumulators ()) and
+       * stays valid for the whole execution.  This function also runs at every
+       * sort-path group start, where a reset would wipe the links the scan
+       * computed.  Garbage protection for the execution-only field lives at
+       * build time instead (regu_init (), stx_build_aggregate_type ()). */
       /* the value of groupby_num() remains unchanged; it will be changed while evaluating groupby_num predicates
        * against each group at 'xs_eval_grbynum_pred()' */
       if (agg_p->function == PT_GROUPBY_NUM)
@@ -318,7 +322,7 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
 	{
 	  if (acc->num_sum_acc.is_active)
 	    {
-	      if (numeric_sum_acc_add_acc (&acc->num_sum_acc, &new_acc->num_sum_acc) != NO_ERROR)
+	      if (qdata_sum_acc_merge (&acc->num_sum_acc, &new_acc->num_sum_acc) != NO_ERROR)
 		{
 		  return ER_FAILED;
 		}
@@ -343,7 +347,7 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
 	  /* acc carries a partial sum that exists only as a DB_VALUE -- it came back from a
 	   * spill file, where the words do not fit the list file's three columns.  The source
 	   * has to become a value too and go through the seed path below. */
-	  if (numeric_sum_acc_finalize (&new_acc->num_sum_acc, new_acc->value) != NO_ERROR)
+	  if (qdata_sum_acc_finalize (&new_acc->num_sum_acc, new_acc->value) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -604,7 +608,8 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	 * are deferred to finalize. acc->value keeps the first value only (its domain info
 	 * is still needed), so anything that needs the running sum has to finalize the
 	 * accumulator first rather than read acc->value. */
-	bool use_sum_acc = (qdata_numeric_sum_acc_enabled () && DB_VALUE_DOMAIN_TYPE (value) == DB_TYPE_NUMERIC);
+	bool use_sum_acc = (qdata_numeric_sum_acc_enabled ()
+			    && NUMERIC_SUM_ACC_INPUT_OK (DB_VALUE_DOMAIN_TYPE (value)));
 
 	if (acc->curr_cnt < 1)
 	  {
@@ -612,6 +617,18 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	  }
 	else if (!use_sum_acc)
 	  {
+	    if (acc->num_sum_acc.is_active)
+	      {
+		/* A non-NUMERIC value arrived while the word accumulator holds the
+		 * running sum.  Adding it to acc->value -- which keeps only the first
+		 * value in this mode -- would be silently discarded when finalize
+		 * overwrites it with the words.  The operand type is fixed per query,
+		 * so this is unreachable; guard it the same way the parallel worker
+		 * does rather than corrupt silently. */
+		assert (false);
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+		return ER_FAILED;
+	      }
 	    /* values are added up in acc.value */
 	    if (qdata_add_dbval (acc->value, value, acc->value, domain->value_dom) != NO_ERROR)
 	      {
@@ -623,7 +640,7 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	 * passed as a seed source: a spilled hash entry comes back with its partial sum
 	 * flattened into it and no word state at all. */
 	if (use_sum_acc
-	    && numeric_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, acc->value, value) != NO_ERROR)
+	    && qdata_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, acc->value, value) != NO_ERROR)
 	  {
 	    return ER_FAILED;
 	  }
@@ -777,7 +794,7 @@ qdata_aggregate_multiple_values_to_accumulator (cubthread::entry *thread_p, cubx
  * or an AVG can never carry it, and qdata_agg_may_share_accumulator () relies on this
  * assert rather than testing the flag again.
  */
-static bool
+static inline bool
 qdata_agg_is_plain_sum_avg (const cubxasl::aggregate_list_node *agg_p)
 {
   assert (!agg_p->flag.min_max_optimized || (agg_p->function != PT_SUM && agg_p->function != PT_AVG));
@@ -791,7 +808,7 @@ qdata_agg_is_plain_sum_avg (const cubxasl::aggregate_list_node *agg_p)
  * qdata_agg_may_share_accumulator () - can this aggregate take part in accumulator sharing?
  *   return: true for a plain SUM/AVG over a single referenced value
  */
-static bool
+static inline bool
 qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
 {
   /* the leading test also settles operands != NULL, so the dereferences below are safe.
@@ -973,7 +990,8 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	   * Note the flag says nothing about *this* row -- an expression or a host
 	   * variable can change type per row, which is why the peek path below still
 	   * tests the value itself. */
-	  if (accumulator->num_sum_acc.is_active && agg_p->operands->value.type == TYPE_INARITH)
+	  if (accumulator->num_sum_acc.is_active && accumulator->num_sum_acc.kind == (unsigned char) DB_TYPE_NULL
+	      && agg_p->operands->value.type == TYPE_INARITH)
 	    {
 	      NUMERIC_POC_CHAIN_VAL cv;
 
@@ -1006,15 +1024,34 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  /* ---- NUMERIC only -------------------------------------------------
 	   * The word accumulator is live, so feed it directly and skip the
 	   * per-function dispatch. */
-	  if (accumulator->num_sum_acc.is_active && DB_VALUE_DOMAIN_TYPE (peek_val) == DB_TYPE_NUMERIC)
+	  if (accumulator->num_sum_acc.is_active)
 	    {
-	      if (numeric_sum_acc_add_value (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
+	      DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (peek_val);
+
+	      if (vtype == DB_TYPE_NUMERIC && accumulator->num_sum_acc.kind == (unsigned char) DB_TYPE_NULL)
 		{
-		  return ER_FAILED;
+		  if (numeric_sum_acc_add_value (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
+		    {
+		      return ER_FAILED;
+		    }
+
+		  accumulator->curr_cnt++;
+		  continue;
 		}
 
-	      accumulator->curr_cnt++;
-	      continue;
+	      /* typed (SHORT/INT/BIGINT/DOUBLE/FLOAT) sum: one add against the type's
+	       * own range check, skipping the per-function dispatch */
+	      if (accumulator->num_sum_acc.kind != (unsigned char) DB_TYPE_NULL
+		  && accumulator->num_sum_acc.kind == (unsigned char) numeric_sum_acc_kind_for (vtype))
+		{
+		  if (qdata_sum_acc_add_typed (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
+		    {
+		      return ER_FAILED;
+		    }
+
+		  accumulator->curr_cnt++;
+		  continue;
+		}
 	    }
 
 	  /* outer: a first value, a reinstated partial, or any non-NUMERIC type.  This
@@ -1776,7 +1813,7 @@ qdata_finalize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
       if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
 	  && agg_p->accumulator.num_sum_acc.is_active)
 	{
-	  error = numeric_sum_acc_finalize (&agg_p->accumulator.num_sum_acc, agg_p->accumulator.value);
+	  error = qdata_sum_acc_finalize (&agg_p->accumulator.num_sum_acc, agg_p->accumulator.value);
 	  if (error != NO_ERROR)
 	    {
 	      goto exit;
@@ -2990,11 +3027,11 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
 
   for (i = 0; i < value->func_count; i++)
     {
-      /* POC: a spilled partial is saved as an ordinary DB_VALUE; finalize the word
+      /* POC: a spilled partial is saved as an ordinary DB_VALUE; flatten the word
        * accumulator first. (rounding at a spill boundary; see the design note) */
       if (qdata_numeric_sum_acc_enabled () && value->accumulators[i].num_sum_acc.is_active)
 	{
-	  if (numeric_sum_acc_finalize (&value->accumulators[i].num_sum_acc, value->accumulators[i].value) != NO_ERROR)
+	  if (qdata_sum_acc_flatten_for_spill (&value->accumulators[i].num_sum_acc, value->accumulators[i].value) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }

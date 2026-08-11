@@ -185,13 +185,30 @@ extern bool numeric_db_value_is_zero (const DB_VALUE * arg);
 extern int numeric_db_value_is_positive (const DB_VALUE * arg);
 
 /*
- * NUMERIC_SUM_ACC: word-based accumulator for aggregate SUM/AVG (POC).
+ * NUMERIC_SUM_ACC: accumulator for aggregate SUM/AVG (POC).
  *
- * Accumulates NUMERIC values as raw words and defers digit counting,
+ * For NUMERIC input it accumulates raw words and defers digit counting,
  * overflow checking, rounding and DB_VALUE packing to a single finalize
  * call, instead of performing them for every accumulated row.
  *
  * Invariant: rounding happens exactly once per group, at finalize.
+ *
+ * For SHORT/INTEGER/BIGINT/DOUBLE input the same accumulator runs in a typed
+ * mode instead: the running sum lives in int_sum or dbl_sum and `kind` records
+ * which input type it stands for.  The legacy path accumulates in the *input*
+ * type -- SUM (SHORT) overflows past 32767 -- so every typed add re-checks the
+ * input type's range and raises the same ER_QPROC_OVERFLOW_ADDITION at the
+ * same row the legacy path would.  Integer adds are exact and double adds are
+ * the same IEEE operations in the same order, so the results are bit-identical;
+ * the saving is the per-row DB_VALUE dispatch, not the arithmetic.
+ *
+ * FLOAT input runs as kind DOUBLE: the legacy accumulation domain for a FLOAT
+ * argument is DOUBLE (a sum may pass FLT_MAX mid-group and come back without an
+ * error; only the final demotion to FLOAT can raise ER_IT_DATA_OVERFLOW), so
+ * double accumulation is the faithful reproduction, not float-by-float.
+ *
+ * `kind` is meaningful only while is_active is set; DB_TYPE_NULL means the
+ * word (NUMERIC) mode.
  */
 #define NUMERIC_SUM_ACC_WORDS  (14)	/* covers TWICE_NUM_MAX_PREC (256) decimal digits */
 
@@ -199,11 +216,38 @@ typedef struct numeric_sum_acc NUMERIC_SUM_ACC;
 struct numeric_sum_acc
 {
   uint64_t words[NUMERIC_SUM_ACC_WORDS];	/* big-endian word order; [NUMERIC_SUM_ACC_WORDS - 1] is the LSW */
+  int64_t int_sum;		/* running sum when kind is SHORT/INTEGER/BIGINT */
+  double dbl_sum;		/* running sum when kind is DOUBLE */
   int used_words;		/* number of active low words */
   int scale;			/* scale of the accumulated value */
+  unsigned char kind;		/* DB_TYPE of a typed sum; DB_TYPE_NULL = word (NUMERIC) mode */
   bool is_negative;
   bool is_active;		/* false until the first value is accumulated */
 };
+
+/* the input types the accumulator takes; everything else stays legacy */
+#define NUMERIC_SUM_ACC_INPUT_OK(t) \
+  ((t) == DB_TYPE_NUMERIC || (t) == DB_TYPE_INTEGER || (t) == DB_TYPE_BIGINT \
+   || (t) == DB_TYPE_SHORT || (t) == DB_TYPE_DOUBLE || (t) == DB_TYPE_FLOAT)
+
+/* the typed-mode kind an input type accumulates under (FLOAT widens to DOUBLE,
+ * matching the legacy accumulation domain); DB_TYPE_NULL = not a typed input */
+static inline DB_TYPE
+numeric_sum_acc_kind_for (DB_TYPE t)
+{
+  switch (t)
+    {
+    case DB_TYPE_SHORT:
+    case DB_TYPE_INTEGER:
+    case DB_TYPE_BIGINT:
+    case DB_TYPE_DOUBLE:
+      return t;
+    case DB_TYPE_FLOAT:
+      return DB_TYPE_DOUBLE;
+    default:
+      return DB_TYPE_NULL;
+    }
+}
 
 /*
  * NUMERIC_POC_CHAIN_VAL: carrier for a {+,-,x} expression tree evaluated entirely
@@ -252,6 +296,6 @@ extern int numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, con
 				       const DB_VALUE * value);
 extern int numeric_sum_acc_add_acc (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other);
 extern int numeric_sum_acc_add_u128 (NUMERIC_SUM_ACC * acc, uint128_t coeff, int scale, bool is_negative);
-extern int numeric_sum_acc_snapshot (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
+extern int numeric_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 extern int numeric_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result);
 #endif /* _NUMERIC_OPFUNC_H_ */
