@@ -207,8 +207,10 @@ extern int numeric_db_value_is_positive (const DB_VALUE * arg);
  * error; only the final demotion to FLOAT can raise ER_IT_DATA_OVERFLOW), so
  * double accumulation is the faithful reproduction, not float-by-float.
  *
- * `kind` is meaningful only while is_active is set; DB_TYPE_NULL means the
- * word (NUMERIC) mode.
+ * `kind` holds the DB_TYPE the sum accumulates under -- DB_TYPE_NUMERIC for
+ * the word mode, the typed types above otherwise -- and is meaningful only
+ * while is_active is set: activation always writes it, and nothing reads it
+ * while the accumulator is inactive.
  */
 #define NUMERIC_SUM_ACC_WORDS  (14)	/* covers TWICE_NUM_MAX_PREC (256) decimal digits */
 
@@ -220,7 +222,7 @@ struct numeric_sum_acc
   double dbl_sum;		/* running sum when kind is DOUBLE */
   int used_words;		/* number of active low words */
   int scale;			/* scale of the accumulated value */
-  unsigned char kind;		/* DB_TYPE of a typed sum; DB_TYPE_NULL = word (NUMERIC) mode */
+  DB_TYPE kind;			/* what the sum accumulates under; valid only while is_active */
   bool is_negative;
   bool is_active;		/* false until the first value is accumulated */
 };
@@ -230,13 +232,15 @@ struct numeric_sum_acc
   ((t) == DB_TYPE_NUMERIC || (t) == DB_TYPE_INTEGER || (t) == DB_TYPE_BIGINT \
    || (t) == DB_TYPE_SHORT || (t) == DB_TYPE_DOUBLE || (t) == DB_TYPE_FLOAT)
 
-/* the typed-mode kind an input type accumulates under (FLOAT widens to DOUBLE,
- * matching the legacy accumulation domain); DB_TYPE_NULL = not a typed input */
+/* the kind an input type accumulates under: NUMERIC keeps the word mode, FLOAT
+ * widens to DOUBLE (the legacy accumulation domain), the other typed inputs
+ * accumulate as themselves; DB_TYPE_NULL = not an accepted input */
 static inline DB_TYPE
 numeric_sum_acc_kind_for (DB_TYPE t)
 {
   switch (t)
     {
+    case DB_TYPE_NUMERIC:
     case DB_TYPE_SHORT:
     case DB_TYPE_INTEGER:
     case DB_TYPE_BIGINT:

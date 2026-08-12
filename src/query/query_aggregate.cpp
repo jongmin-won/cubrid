@@ -990,7 +990,7 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	   * Note the flag says nothing about *this* row -- an expression or a host
 	   * variable can change type per row, which is why the peek path below still
 	   * tests the value itself. */
-	  if (accumulator->num_sum_acc.is_active && accumulator->num_sum_acc.kind == (unsigned char) DB_TYPE_NULL
+	  if (accumulator->num_sum_acc.is_active && accumulator->num_sum_acc.kind == DB_TYPE_NUMERIC
 	      && agg_p->operands->value.type == TYPE_INARITH)
 	    {
 	      NUMERIC_POC_CHAIN_VAL cv;
@@ -1028,7 +1028,7 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	    {
 	      DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (peek_val);
 
-	      if (vtype == DB_TYPE_NUMERIC && accumulator->num_sum_acc.kind == (unsigned char) DB_TYPE_NULL)
+	      if (vtype == DB_TYPE_NUMERIC && accumulator->num_sum_acc.kind == DB_TYPE_NUMERIC)
 		{
 		  if (numeric_sum_acc_add_value (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
 		    {
@@ -1041,8 +1041,7 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 
 	      /* typed (SHORT/INT/BIGINT/DOUBLE/FLOAT) sum: one add against the type's
 	       * own range check, skipping the per-function dispatch */
-	      if (accumulator->num_sum_acc.kind != (unsigned char) DB_TYPE_NULL
-		  && accumulator->num_sum_acc.kind == (unsigned char) numeric_sum_acc_kind_for (vtype))
+	      if (vtype != DB_TYPE_NUMERIC && accumulator->num_sum_acc.kind == numeric_sum_acc_kind_for (vtype))
 		{
 		  if (qdata_sum_acc_add_typed (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
 		    {

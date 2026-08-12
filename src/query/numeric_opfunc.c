@@ -4150,7 +4150,7 @@ numeric_sum_acc_load_value (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
    * from it through the engine's precision-to-bytes lookup */
   acc->used_words = NUMERIC_GET_WORD_COUNT (_gv_numeric_precision_to_bytes_lookup[prec]);
   assert (acc->used_words >= 1 && acc->used_words <= NUMERIC_AS_WORDS);
-  acc->kind = (unsigned char) DB_TYPE_NULL;	/* word (NUMERIC) mode */
+  acc->kind = DB_TYPE_NUMERIC;	/* word mode */
   acc->is_active = true;
 }
 
@@ -4282,7 +4282,7 @@ numeric_sum_acc_add_acc (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
 
   assert (acc != NULL && acc->is_active);
   assert (other != NULL && other->is_active);
-  assert (acc->kind == (unsigned char) DB_TYPE_NULL && other->kind == (unsigned char) DB_TYPE_NULL);
+  assert (acc->kind == DB_TYPE_NUMERIC && other->kind == DB_TYPE_NUMERIC);
   assert (other->used_words >= 1 && other->used_words <= NUMERIC_SUM_ACC_WORDS);
 
   /* numeric_sum_acc_add_core () normalizes the value in place, so it gets its own copy */
@@ -4341,7 +4341,7 @@ numeric_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE
       /* new group: discard whatever word state the previous one left behind */
       acc->is_active = false;
     }
-  else if (acc->is_active && acc->kind != (unsigned char) DB_TYPE_NULL)
+  else if (acc->is_active && acc->kind != DB_TYPE_NUMERIC)
     {
       /* a NUMERIC value while the running sum is typed (qdata_sum_acc_* owns that
        * mode): the operand type is fixed per query, so this is unreachable --
@@ -4911,7 +4911,7 @@ numeric_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result)
   bool is_negative;
 
   assert (acc != NULL && acc->is_active && result != NULL);
-  assert (acc->kind == (unsigned char) DB_TYPE_NULL);	/* typed sums live in qdata_sum_acc_* */
+  assert (acc->kind == DB_TYPE_NUMERIC);	/* typed sums live in qdata_sum_acc_* */
 
   /* the window must span at least NUMERIC_AS_WORDS words: numeric_words_to_bytes ()
    * computes its word pointer as src + (src_words - NUMERIC_AS_WORDS) and would read

@@ -2781,7 +2781,7 @@ qdata_sum_acc_start_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       return ER_FAILED;
     }
 
-  acc->kind = (unsigned char) numeric_sum_acc_kind_for (vtype);
+  acc->kind = numeric_sum_acc_kind_for (vtype);
   acc->is_active = true;
   return NO_ERROR;
 }
@@ -2801,7 +2801,7 @@ qdata_sum_acc_add_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
   assert (acc != NULL && acc->is_active && dbv != NULL);
 
   vtype = DB_VALUE_DOMAIN_TYPE (dbv);
-  assert (acc->kind == (unsigned char) numeric_sum_acc_kind_for (vtype));
+  assert (acc->kind == numeric_sum_acc_kind_for (vtype));
 
   switch (vtype)
     {
@@ -2890,6 +2890,7 @@ qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE *
       acc->is_active = false;
     }
   else if (seed_from != NULL && !acc->is_active && !DB_IS_NULL (seed_from)
+	   && DB_VALUE_DOMAIN_TYPE (seed_from) != DB_TYPE_NUMERIC
 	   && numeric_sum_acc_kind_for (DB_VALUE_DOMAIN_TYPE (seed_from)) != DB_TYPE_NULL)
     {
       if (qdata_sum_acc_start_typed (acc, seed_from) != NO_ERROR)
@@ -2902,7 +2903,7 @@ qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE *
     {
       return qdata_sum_acc_start_typed (acc, value);
     }
-  if (acc->kind != (unsigned char) numeric_sum_acc_kind_for (vtype))
+  if (acc->kind != numeric_sum_acc_kind_for (vtype))
     {
       assert (false);
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
@@ -2964,7 +2965,7 @@ qdata_sum_acc_merge (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
 	}
       return NO_ERROR;
     default:
-      /* DB_TYPE_NULL: word (NUMERIC) mode */
+      /* DB_TYPE_NUMERIC: word mode */
       return numeric_sum_acc_add_acc (acc, other);
     }
 
@@ -3005,7 +3006,7 @@ qdata_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result)
       db_make_double (result, acc->dbl_sum);
       return NO_ERROR;
     default:
-      /* DB_TYPE_NULL: word (NUMERIC) mode */
+      /* DB_TYPE_NUMERIC: word mode */
       return numeric_sum_acc_snapshot (acc, result);
     }
 }
