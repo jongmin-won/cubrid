@@ -2754,7 +2754,7 @@ qdata_add_dbval (DB_VALUE * dbval1_p, DB_VALUE * dbval2_p, DB_VALUE * result_p, 
  *   dbv(in)     : first SHORT/INTEGER/BIGINT/DOUBLE/FLOAT value; not NULL-valued
  */
 static int
-qdata_sum_acc_start_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
+qdata_sum_acc_start_typed (SUM_ACC * acc, const DB_VALUE * dbv)
 {
   DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (dbv);
 
@@ -2781,7 +2781,7 @@ qdata_sum_acc_start_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
       return ER_FAILED;
     }
 
-  acc->kind = numeric_sum_acc_kind_for (vtype);
+  acc->sum_type = sum_acc_sum_type_for (vtype);
   acc->is_active = true;
   return NO_ERROR;
 }
@@ -2790,18 +2790,18 @@ qdata_sum_acc_start_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
  * qdata_sum_acc_add_typed () - add one value to an accumulator in typed mode
  *   return: NO_ERROR, or ER_QPROC_OVERFLOW_ADDITION exactly where the legacy
  *           per-row addition would have raised it
- *   acc(in/out) : active accumulator in typed mode; kind matches the value's type
+ *   acc(in/out) : active accumulator in typed mode; sum_type matches the value's type
  *   dbv(in)     : the value; not NULL-valued
  */
 int
-qdata_sum_acc_add_typed (NUMERIC_SUM_ACC * acc, const DB_VALUE * dbv)
+qdata_sum_acc_add_typed (SUM_ACC * acc, const DB_VALUE * dbv)
 {
   DB_TYPE vtype;
 
   assert (acc != NULL && acc->is_active && dbv != NULL);
 
   vtype = DB_VALUE_DOMAIN_TYPE (dbv);
-  assert (acc->kind == numeric_sum_acc_kind_for (vtype));
+  assert (acc->sum_type == sum_acc_sum_type_for (vtype));
 
   switch (vtype)
     {
@@ -2872,7 +2872,7 @@ overflow:
  * corruption, the same stance the NUMERIC-only path takes.
  */
 int
-qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from, const DB_VALUE * value)
+qdata_sum_acc_accumulate (SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from, const DB_VALUE * value)
 {
   DB_TYPE vtype;
 
@@ -2891,7 +2891,7 @@ qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE *
     }
   else if (seed_from != NULL && !acc->is_active && !DB_IS_NULL (seed_from)
 	   && DB_VALUE_DOMAIN_TYPE (seed_from) != DB_TYPE_NUMERIC
-	   && numeric_sum_acc_kind_for (DB_VALUE_DOMAIN_TYPE (seed_from)) != DB_TYPE_NULL)
+	   && sum_acc_sum_type_for (DB_VALUE_DOMAIN_TYPE (seed_from)) != DB_TYPE_NULL)
     {
       if (qdata_sum_acc_start_typed (acc, seed_from) != NO_ERROR)
 	{
@@ -2903,7 +2903,7 @@ qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE *
     {
       return qdata_sum_acc_start_typed (acc, value);
     }
-  if (acc->kind != numeric_sum_acc_kind_for (vtype))
+  if (acc->sum_type != sum_acc_sum_type_for (vtype))
     {
       assert (false);
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
@@ -2919,23 +2919,23 @@ qdata_sum_acc_accumulate (NUMERIC_SUM_ACC * acc, bool is_first, const DB_VALUE *
  *   other(in)   : active source accumulator; left untouched
  *
  * Note: two partial sums of one aggregate share the operand type, so the
- * kinds match; a typed merge re-checks the input type's range like every
+ * sum_types match; a typed merge re-checks the input type's range like every
  * other add.  Word (NUMERIC) accumulators merge in the word domain.
  */
 int
-qdata_sum_acc_merge (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
+qdata_sum_acc_merge (SUM_ACC * acc, const SUM_ACC * other)
 {
   assert (acc != NULL && acc->is_active);
   assert (other != NULL && other->is_active);
 
-  if (acc->kind != other->kind)
+  if (acc->sum_type != other->sum_type)
     {
       assert (false);
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
       return ER_FAILED;
     }
 
-  switch ((DB_TYPE) acc->kind)
+  switch ((DB_TYPE) acc->sum_type)
     {
     case DB_TYPE_SHORT:
       acc->int_sum += other->int_sum;
@@ -2966,7 +2966,7 @@ qdata_sum_acc_merge (NUMERIC_SUM_ACC * acc, const NUMERIC_SUM_ACC * other)
       return NO_ERROR;
     default:
       /* DB_TYPE_NUMERIC: word mode */
-      return numeric_sum_acc_add_acc (acc, other);
+      return numeric_sum_acc_merge (acc, other);
     }
 
 overflow:
@@ -2987,11 +2987,11 @@ overflow:
  * losslessly; the word (NUMERIC) mode rounds a copy, never the live state.
  */
 int
-qdata_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+qdata_sum_acc_snapshot (const SUM_ACC * acc, DB_VALUE * result)
 {
   assert (acc != NULL && acc->is_active && result != NULL);
 
-  switch ((DB_TYPE) acc->kind)
+  switch ((DB_TYPE) acc->sum_type)
     {
     case DB_TYPE_SHORT:
       db_make_short (result, (short) acc->int_sum);
@@ -3023,7 +3023,7 @@ qdata_sum_acc_snapshot (const NUMERIC_SUM_ACC * acc, DB_VALUE * result)
  * (NUMERIC) mode is where the single per-group rounding happens.
  */
 int
-qdata_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+qdata_sum_acc_finalize (SUM_ACC * acc, DB_VALUE * result)
 {
   int ret = qdata_sum_acc_snapshot (acc, result);
 
@@ -3044,7 +3044,7 @@ qdata_sum_acc_finalize (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
  * resumes.  For a typed sum the conversion is lossless either way.
  */
 int
-qdata_sum_acc_flatten_for_spill (NUMERIC_SUM_ACC * acc, DB_VALUE * result)
+qdata_sum_acc_flatten_for_spill (SUM_ACC * acc, DB_VALUE * result)
 {
   return qdata_sum_acc_finalize (acc, result);
 }

@@ -41,6 +41,7 @@
 #include "query_aggregate.hpp"
 #include "query_analytic.hpp"
 #include "query_opfunc.h"
+#include "numeric_opfunc.h"
 #include "fetch.h"
 #include "dbtype.h"
 #include "object_primitive.h"
@@ -15961,7 +15962,7 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	  xasl->proc.buildlist.g_agg_domains_resolved = 0;
 
 	  /* Flag the output expressions that exist only to feed an aggregate, so
-	   * that the word chain can pick them up. Done here, before any scan
+	   * that the agg-expr evaluation can pick them up. Done here, before any scan
 	   * starts and before parallel workers are spawned, so that the serial
 	   * path and every worker -- which inherits the regu flags -- agree.
 	   *
@@ -15993,7 +15994,7 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	  xasl->proc.buildvalue.agg_domains_resolved = 0;
 
 	  /* Flag the operand expressions that exist only to feed an aggregate, so that the
-	   * word chain can pick them up. Done here, before any scan starts and before
+	   * agg-expr evaluation can pick them up. Done here, before any scan starts and before
 	   * parallel workers are spawned, so that the serial path and every worker -- which
 	   * inherits the regu flags -- agree. */
 	  qexec_mark_aggregate_operand_expressions (xasl);
@@ -21254,11 +21255,11 @@ qexec_resolve_domains_for_aggregation (THREAD_ENTRY * thread_p, AGGREGATE_TYPE *
  *
  * A BUILDVALUE has no such indirection -- the aggregate's operand *is* the expression
  * regu -- so that one is flagged directly. The serial path does not need the flag
- * (qdata_evaluate_aggregate_list () already runs the chain on a TYPE_INARITH operand
+ * (qdata_evaluate_aggregate_list () already runs the agg-expr evaluation on a TYPE_INARITH operand
  * before fetching), but a parallel worker does: px_scan_result_handler fetches the
- * operand itself, and fetch_peek_arith () only reaches the chain through this flag.
+ * operand itself, and fetch_peek_arith () only reaches the agg-expr evaluation through this flag.
  *
- * The flag keeps the word chain -- which belongs to the aggregate path -- from
+ * The flag keeps the agg-expr evaluation -- which belongs to the aggregate path -- from
  * reaching general expressions: those stay with the float_numeric_db_value_*
  * operators. Called once per query, right after the aggregate domains resolve.
  */
@@ -21282,7 +21283,7 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
   if (xasl->type == BUILDVALUE_PROC)
     {
       /* Narrower than the BUILDLIST rule below, which flags whatever aggregate an
-       * output expression happens to feed: the chain rounds differently from the
+       * output expression happens to feed: the agg-expr evaluation rounds differently from the
        * per-operation operators, and only SUM/AVG has been measured against that. */
       for (agg_p = xasl->proc.buildvalue.agg_list; agg_p != NULL; agg_p = agg_p->next)
 	{
@@ -21296,7 +21297,7 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
 	      continue;
 	    }
 
-	  if (fetch_poc_chain_shape_ok (&agg_p->operands->value, budget))
+	  if (fetch_is_agg_expr_shape (&agg_p->operands->value, budget))
 	    {
 	      REGU_VARIABLE_SET_FLAG (&agg_p->operands->value, REGU_VARIABLE_AGG_OPERAND);
 	    }
@@ -21310,7 +21311,7 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
     }
 
   /* Analytic SUM/AVG is deliberately not covered, and the reason is not obvious enough to
-   * leave unwritten -- four attempts at flagging it all measured zero chain calls:
+   * leave unwritten -- four attempts at flagging it all measured zero agg-expr calls:
    *
    *   func_p->operand          pt_to_analytic_node () always builds it as TYPE_CONSTANT
    *                            pointing at an a_val_list slot (xasl_generation.c), so it is
@@ -21319,7 +21320,7 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
    *   a_outptr_list_ex         the output list, not what evaluates the operand
    *   a_scan_regu_list         where the expression really is by construction -- it fills
    *                            the slot during the scan, before the sort the analytic needs
-   *                            -- and flagging it still produced no chain call
+   *                            -- and flagging it still produced no agg-expr call
    *
    * A flat query (no derived table) behaves the same, so it is not a matter of the marking
    * failing to reach an inner XASL either.  Whatever consumes those regu variables does not
@@ -21347,7 +21348,7 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
 	    {
 	      /* The tree shape is fixed for the whole query, so settle it here and
 	       * let the row path test one flag instead of walking the tree again. */
-	      if (fetch_poc_chain_shape_ok (&regu_p->value, budget))
+	      if (fetch_is_agg_expr_shape (&regu_p->value, budget))
 		{
 		  REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
 		}

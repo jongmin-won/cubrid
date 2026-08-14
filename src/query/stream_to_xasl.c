@@ -5968,7 +5968,7 @@ stx_build_aggregate_type (THREAD_ENTRY * thread_p, char *ptr, AGGREGATE_TYPE * a
    * shared_from uninitialized let qdata_propagate_shared_accumulators () read a
    * stray index and fail on a server that receives its XASL from a client. */
   aggregate->accumulator.shared_from = 0;
-  aggregate->accumulator.num_sum_acc.is_active = false;
+  aggregate->accumulator.sum_acc.is_active = false;
   ptr = or_unpack_int (ptr, &offset);
   if (offset == 0)
     {

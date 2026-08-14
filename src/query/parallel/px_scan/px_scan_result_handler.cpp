@@ -1286,7 +1286,7 @@ namespace parallel_scan
      * when the first NUMERIC value arrives.  Done before any early return because the
      * worker XASL comes from stx_alloc_struct (), which does not zero the buffer --
      * mirrors qdata_initialize_aggregate_list () on the serial side. */
-    agg_node->accumulator.num_sum_acc.is_active = false;
+    agg_node->accumulator.sum_acc.is_active = false;
 
     if constexpr (F == PT_COUNT_STAR)
       {
@@ -1618,7 +1618,7 @@ namespace parallel_scan
 	 * its own accumulator; finalize_node () merges it through
 	 * qdata_aggregate_accumulator_to_accumulator (), which knows how to drain it.
 	 * acc->value still keeps the first value so its domain information survives. */
-	if (numeric_poc_gate_enabled () && NUMERIC_SUM_ACC_INPUT_OK (DB_VALUE_DOMAIN_TYPE (db_value_p)))
+	if (numeric_poc_gate_enabled () && SUM_ACC_IS_INPUT_TYPE (DB_VALUE_DOMAIN_TYPE (db_value_p)))
 	  {
 	    if (acc->curr_cnt < 1)
 	      {
@@ -1631,7 +1631,7 @@ namespace parallel_scan
 
 	    /* no seed source: this accumulator belongs to one worker and never leaves
 	     * memory, so acc->value can never hold a partial sum the words do not have */
-	    if (qdata_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, NULL, db_value_p) != NO_ERROR)
+	    if (qdata_sum_acc_accumulate (&acc->sum_acc, acc->curr_cnt < 1, NULL, db_value_p) != NO_ERROR)
 	      {
 		return false;
 	      }
@@ -1644,7 +1644,7 @@ namespace parallel_scan
 	 * running sum, so the legacy branch below would add onto the wrong base and the
 	 * two partial sums would then fight over the result. The operand type is fixed
 	 * per query, so this is unreachable -- guard it rather than corrupt silently. */
-	if (acc->num_sum_acc.is_active)
+	if (acc->sum_acc.is_active)
 	  {
 	    assert (false);
 	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);

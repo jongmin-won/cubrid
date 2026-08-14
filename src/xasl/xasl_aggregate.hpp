@@ -24,7 +24,7 @@
 #define _XASL_AGGREGATE_HPP_
 
 #include "dbtype_def.h"
-#include "numeric_opfunc.h"
+#include "query_sum_accumulator.h"
 #include "storage_common.h"
 
 // forward definitions
@@ -68,7 +68,7 @@ namespace cubxasl
     INT64 curr_cnt;			/* current number of items */
     bool clear_value_at_clone_decache;	/* true, if need to clear value at clone decache */
     bool clear_value2_at_clone_decache;	/* true, if need to clear value2 at clone decache */
-    NUMERIC_SUM_ACC num_sum_acc;	/* POC: word accumulator for NUMERIC SUM/AVG */
+    SUM_ACC sum_acc;	/* POC: word accumulator for NUMERIC SUM/AVG */
     /* One plus the index of the preceding aggregate whose accumulation this one
      * shares, or 0 for none.  SUM and AVG over the same argument accumulate the
      * same sum, so only the first of them accumulates; the others copy that state

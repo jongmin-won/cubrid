@@ -30,6 +30,7 @@
 #include "list_file.h"
 #include "memory_alloc.h"
 #include "memory_hash.h"
+#include "numeric_opfunc.h"
 #include "object_domain.h"
 #include "object_primitive.h"
 #include "object_representation.h"
@@ -133,27 +134,27 @@ qdata_numeric_sum_acc_enabled (void)
 }
 
 /* POC B2: word-domain evaluation of NUMERIC-only {+,-,x} aggregate operand trees.
- * The arithmetic lives in numeric_opfunc.c (NUMERIC_POC_CHAIN_VAL); what remains
+ * The arithmetic lives in numeric_opfunc.c (NUMERIC_AGG_EXPR_VAL); what remains
  * here is walking the operand tree. Division and any unsupported shape fall back
  * to the legacy DB_VALUE path.
  *
- * Leaves go through numeric_poc_chain_from_dbv (), the same one fetch_poc_eval_chain ()
+ * Leaves go through numeric_agg_expr_from_dbv (), the same one fetch_agg_expr_eval ()
  * uses, so both entry points accept exactly the same set. A bare integer leaf never
  * arrives: instrumenting it showed that an integer always reaches a NUMERIC operator
  * wrapped in T_CAST_WRAP, so the integer case is handled at the wrap instead. */
 
 static bool
-qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out)
+qdata_agg_expr_eval (const REGU_VARIABLE *regu, NUMERIC_AGG_EXPR_VAL *out)
 {
   ARITH_TYPE *arith;
-  NUMERIC_POC_CHAIN_VAL left, right;
+  NUMERIC_AGG_EXPR_VAL left, right;
 
   switch (regu->type)
     {
     case TYPE_CONSTANT:
-      return numeric_poc_chain_from_dbv (regu->value.dbvalptr, out);
+      return numeric_agg_expr_from_dbv (regu->value.dbvalptr, out);
     case TYPE_DBVAL:
-      return numeric_poc_chain_from_dbv (&regu->value.dbval, out);
+      return numeric_agg_expr_from_dbv (&regu->value.dbval, out);
     case TYPE_INARITH:
       break;
     default:
@@ -168,16 +169,16 @@ qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out
 
   if (arith->opcode == T_CAST_WRAP && arith->rightptr != NULL)
     {
-      /* Absorb the wrapped integer the same way fetch_poc_eval_chain () does, so both
+      /* Absorb the wrapped integer the same way fetch_agg_expr_eval () does, so both
        * entry points fuse the same trees.  This walker has no thread context, so only a
        * source it can read on its own qualifies; anything else falls back, and the
        * caller's fetch_peek_dbval () re-runs the tree through the other entry. */
       switch (arith->rightptr->type)
 	{
 	case TYPE_CONSTANT:
-	  return numeric_poc_chain_from_int_dbv (arith->rightptr->value.dbvalptr, out);
+	  return numeric_agg_expr_from_int_dbv (arith->rightptr->value.dbvalptr, out);
 	case TYPE_DBVAL:
-	  return numeric_poc_chain_from_int_dbv (&arith->rightptr->value.dbval, out);
+	  return numeric_agg_expr_from_int_dbv (&arith->rightptr->value.dbval, out);
 	default:
 	  return false;
 	}
@@ -189,17 +190,17 @@ qdata_poc_eval_word_chain (const REGU_VARIABLE *regu, NUMERIC_POC_CHAIN_VAL *out
       return false;
     }
 
-  if (!qdata_poc_eval_word_chain (arith->leftptr, &left) || !qdata_poc_eval_word_chain (arith->rightptr, &right))
+  if (!qdata_agg_expr_eval (arith->leftptr, &left) || !qdata_agg_expr_eval (arith->rightptr, &right))
     {
       return false;
     }
 
   if (arith->opcode == T_MUL)
     {
-      return numeric_poc_chain_mul (&left, &right, out);
+      return numeric_agg_expr_mul (&left, &right, out);
     }
 
-  return numeric_poc_chain_add (&left, &right, arith->opcode == T_SUB, out);
+  return numeric_agg_expr_add (&left, &right, arith->opcode == T_SUB, out);
 }
 
 /*
@@ -236,7 +237,7 @@ qdata_initialize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_
 
       /* CAUTION : if modify initializing ACC's value then should change qdata_alloc_agg_hvalue() */
       agg_p->accumulator.curr_cnt = 0;
-      agg_p->accumulator.num_sum_acc.is_active = false;
+      agg_p->accumulator.sum_acc.is_active = false;
       if (db_value_domain_init (agg_p->accumulator.value, DB_VALUE_DOMAIN_TYPE (agg_p->accumulator.value),
 				DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE) != NO_ERROR)
 	{
@@ -318,11 +319,11 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
        * worker -- agreeing with the serial plan once a partial sum passes
        * DB_MAX_NUMERIC_PRECISION.  Gated so gate-off never depends on the field being
        * zero-initialized. */
-      if (qdata_numeric_sum_acc_enabled () && new_acc->num_sum_acc.is_active)
+      if (qdata_numeric_sum_acc_enabled () && new_acc->sum_acc.is_active)
 	{
-	  if (acc->num_sum_acc.is_active)
+	  if (acc->sum_acc.is_active)
 	    {
-	      if (qdata_sum_acc_merge (&acc->num_sum_acc, &new_acc->num_sum_acc) != NO_ERROR)
+	      if (qdata_sum_acc_merge (&acc->sum_acc, &new_acc->sum_acc) != NO_ERROR)
 		{
 		  return ER_FAILED;
 		}
@@ -335,7 +336,7 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
 	      /* nothing accumulated here yet -- take the whole state rather than rounding it
 	       * through a DB_VALUE.  acc->value is not the running sum in this mode, but keep
 	       * it in step so its domain matches what finalize will write back. */
-	      acc->num_sum_acc = new_acc->num_sum_acc;
+	      acc->sum_acc = new_acc->sum_acc;
 	      pr_clear_value (acc->value);
 	      if (pr_clone_value (new_acc->value, acc->value) != NO_ERROR)
 		{
@@ -347,7 +348,7 @@ qdata_aggregate_accumulator_to_accumulator (cubthread::entry *thread_p, cubxasl:
 	  /* acc carries a partial sum that exists only as a DB_VALUE -- it came back from a
 	   * spill file, where the words do not fit the list file's three columns.  The source
 	   * has to become a value too and go through the seed path below. */
-	  if (qdata_sum_acc_finalize (&new_acc->num_sum_acc, new_acc->value) != NO_ERROR)
+	  if (qdata_sum_acc_finalize (&new_acc->sum_acc, new_acc->value) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -609,7 +610,7 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	 * is still needed), so anything that needs the running sum has to finalize the
 	 * accumulator first rather than read acc->value. */
 	bool use_sum_acc = (qdata_numeric_sum_acc_enabled ()
-			    && NUMERIC_SUM_ACC_INPUT_OK (DB_VALUE_DOMAIN_TYPE (value)));
+			    && SUM_ACC_IS_INPUT_TYPE (DB_VALUE_DOMAIN_TYPE (value)));
 
 	if (acc->curr_cnt < 1)
 	  {
@@ -617,7 +618,7 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	  }
 	else if (!use_sum_acc)
 	  {
-	    if (acc->num_sum_acc.is_active)
+	    if (acc->sum_acc.is_active)
 	      {
 		/* A non-NUMERIC value arrived while the word accumulator holds the
 		 * running sum.  Adding it to acc->value -- which keeps only the first
@@ -640,7 +641,7 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	 * passed as a seed source: a spilled hash entry comes back with its partial sum
 	 * flattened into it and no word state at all. */
 	if (use_sum_acc
-	    && qdata_sum_acc_accumulate (&acc->num_sum_acc, acc->curr_cnt < 1, acc->value, value) != NO_ERROR)
+	    && qdata_sum_acc_accumulate (&acc->sum_acc, acc->curr_cnt < 1, acc->value, value) != NO_ERROR)
 	  {
 	    return ER_FAILED;
 	  }
@@ -978,10 +979,10 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	   * Evaluate a {+,-,x} argument tree whole in the word domain, so not even
 	   * one DB_VALUE is built.  There is no type test here because is_active is
 	   * itself the type gate: it means "a NUMERIC value has already been
-	   * accumulated".  numeric_sum_acc_add_value () is the only thing that turns it
+	   * accumulated".  numeric_sum_acc_add_dbv () is the only thing that turns it
 	   * on -- directly or through numeric_sum_acc_accumulate () -- and every call to
-	   * it sits behind a NUMERIC check; the chain entry point
-	   * (numeric_sum_acc_add_u128 ()) asserts is_active instead of seeding.
+	   * it sits behind a NUMERIC check; the agg-expr entry point
+	   * (numeric_sum_acc_add_expr_val ()) asserts is_active instead of seeding.
 	   *
 	   * A purely integer argument therefore never gets here: its first row fails
 	   * the NUMERIC test below, is_active stays off, and this branch stays
@@ -990,14 +991,14 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	   * Note the flag says nothing about *this* row -- an expression or a host
 	   * variable can change type per row, which is why the peek path below still
 	   * tests the value itself. */
-	  if (accumulator->num_sum_acc.is_active && accumulator->num_sum_acc.kind == DB_TYPE_NUMERIC
+	  if (accumulator->sum_acc.is_active && accumulator->sum_acc.sum_type == DB_TYPE_NUMERIC
 	      && agg_p->operands->value.type == TYPE_INARITH)
 	    {
-	      NUMERIC_POC_CHAIN_VAL cv;
+	      NUMERIC_AGG_EXPR_VAL cv;
 
-	      if (qdata_poc_eval_word_chain (&agg_p->operands->value, &cv))
+	      if (qdata_agg_expr_eval (&agg_p->operands->value, &cv))
 		{
-		  if (numeric_sum_acc_add_u128 (&accumulator->num_sum_acc, cv.coeff, cv.scale, cv.neg) != NO_ERROR)
+		  if (numeric_sum_acc_add_expr_val (&accumulator->sum_acc, &cv) != NO_ERROR)
 		    {
 		      return ER_FAILED;
 		    }
@@ -1024,13 +1025,13 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  /* ---- NUMERIC only -------------------------------------------------
 	   * The word accumulator is live, so feed it directly and skip the
 	   * per-function dispatch. */
-	  if (accumulator->num_sum_acc.is_active)
+	  if (accumulator->sum_acc.is_active)
 	    {
 	      DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (peek_val);
 
-	      if (vtype == DB_TYPE_NUMERIC && accumulator->num_sum_acc.kind == DB_TYPE_NUMERIC)
+	      if (vtype == DB_TYPE_NUMERIC && accumulator->sum_acc.sum_type == DB_TYPE_NUMERIC)
 		{
-		  if (numeric_sum_acc_add_value (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
+		  if (numeric_sum_acc_add_dbv (&accumulator->sum_acc, peek_val) != NO_ERROR)
 		    {
 		      return ER_FAILED;
 		    }
@@ -1041,9 +1042,9 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 
 	      /* typed (SHORT/INT/BIGINT/DOUBLE/FLOAT) sum: one add against the type's
 	       * own range check, skipping the per-function dispatch */
-	      if (vtype != DB_TYPE_NUMERIC && accumulator->num_sum_acc.kind == numeric_sum_acc_kind_for (vtype))
+	      if (vtype != DB_TYPE_NUMERIC && accumulator->sum_acc.sum_type == sum_acc_sum_type_for (vtype))
 		{
-		  if (qdata_sum_acc_add_typed (&accumulator->num_sum_acc, peek_val) != NO_ERROR)
+		  if (qdata_sum_acc_add_typed (&accumulator->sum_acc, peek_val) != NO_ERROR)
 		    {
 		      return ER_FAILED;
 		    }
@@ -1723,8 +1724,8 @@ qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
 	}
 
       agg_p->accumulator.curr_cnt = owner_p->accumulator.curr_cnt;
-      agg_p->accumulator.num_sum_acc = owner_p->accumulator.num_sum_acc;
-      if (!owner_p->accumulator.num_sum_acc.is_active)
+      agg_p->accumulator.sum_acc = owner_p->accumulator.sum_acc;
+      if (!owner_p->accumulator.sum_acc.is_active)
 	{
 	  /* the owner never reached the word accumulator (a non-NUMERIC value, or a
 	   * fallback); its running value carries the sum instead */
@@ -1810,9 +1811,9 @@ qdata_finalize_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
       /* POC: turn the word accumulator into acc->value once, before any consumer
        * (AVG's division below, domain casts) reads it. this is the single rounding point. */
       if (qdata_numeric_sum_acc_enabled () && (agg_p->function == PT_SUM || agg_p->function == PT_AVG)
-	  && agg_p->accumulator.num_sum_acc.is_active)
+	  && agg_p->accumulator.sum_acc.is_active)
 	{
-	  error = qdata_sum_acc_finalize (&agg_p->accumulator.num_sum_acc, agg_p->accumulator.value);
+	  error = qdata_sum_acc_finalize (&agg_p->accumulator.sum_acc, agg_p->accumulator.value);
 	  if (error != NO_ERROR)
 	    {
 	      goto exit;
@@ -2611,7 +2612,7 @@ qdata_alloc_agg_hvalue (cubthread::entry *thread_p, int func_cnt, cubxasl::aggre
     {
       value->accumulators[i].value = pr_make_value ();
       value->accumulators[i].value2 = pr_make_value ();
-      value->accumulators[i].num_sum_acc.is_active = false;
+      value->accumulators[i].sum_acc.is_active = false;
       value->accumulators[i].shared_from = 0;
     }
   /* initialize accumulators.value */
@@ -2926,7 +2927,7 @@ qdata_load_agg_hvalue_in_agg_list (aggregate_hash_value *value, cubxasl::aggrega
 	  /* POC: the word accumulator state travels with the accumulator (plain data),
 	   * and so does the sharing link -- the list finalized per group is not the one
 	   * the sharing was computed on, and the hash value's array joins the two */
-	  agg_list->accumulator.num_sum_acc = value->accumulators[i].num_sum_acc;
+	  agg_list->accumulator.sum_acc = value->accumulators[i].sum_acc;
 	  agg_list->accumulator.shared_from = value->accumulators[i].shared_from;
 
 	  if (copy_vals)
@@ -3013,8 +3014,8 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
 	}
 
       value->accumulators[i].curr_cnt = value->accumulators[owner].curr_cnt;
-      value->accumulators[i].num_sum_acc = value->accumulators[owner].num_sum_acc;
-      if (!value->accumulators[owner].num_sum_acc.is_active)
+      value->accumulators[i].sum_acc = value->accumulators[owner].sum_acc;
+      if (!value->accumulators[owner].sum_acc.is_active)
 	{
 	  pr_clear_value (value->accumulators[i].value);
 	  if (pr_clone_value (value->accumulators[owner].value, value->accumulators[i].value) != NO_ERROR)
@@ -3028,9 +3029,9 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
     {
       /* POC: a spilled partial is saved as an ordinary DB_VALUE; flatten the word
        * accumulator first. (rounding at a spill boundary; see the design note) */
-      if (qdata_numeric_sum_acc_enabled () && value->accumulators[i].num_sum_acc.is_active)
+      if (qdata_numeric_sum_acc_enabled () && value->accumulators[i].sum_acc.is_active)
 	{
-	  if (qdata_sum_acc_flatten_for_spill (&value->accumulators[i].num_sum_acc, value->accumulators[i].value) != NO_ERROR)
+	  if (qdata_sum_acc_flatten_for_spill (&value->accumulators[i].sum_acc, value->accumulators[i].value) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }

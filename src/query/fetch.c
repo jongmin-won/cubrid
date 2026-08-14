@@ -68,26 +68,26 @@ static int fetch_peek_min_max_value_of_width_bucket_func (THREAD_ENTRY * thread_
 							  val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl,
 							  DB_VALUE ** min, DB_VALUE ** max);
 
-/* The chain family an aggregate operand tree evaluates under, derived from the
- * root's result domain.  The shape is validated per family once per query, at
- * marking time; the run-time hook re-derives the family with one switch. */
+/* The type group an aggregate operand tree evaluates under, derived from the
+ * root's result domain.  The shape is validated per type_group once per query, at
+ * marking time; the run-time hook re-derives the type_group with one switch. */
 typedef enum
 {
-  FETCH_POC_CHAIN_NONE = 0,
-  FETCH_POC_CHAIN_NUMERIC,	/* {+,-,x} over NUMERIC; u128 coefficient registers */
-  FETCH_POC_CHAIN_INT,		/* SHORT/INTEGER/BIGINT nodes; int64 registers */
-  FETCH_POC_CHAIN_DOUBLE	/* DOUBLE nodes (FLOAT only as a leaf); double registers */
-} FETCH_POC_CHAIN_FAMILY;
+  AGG_EXPR_TYPE_GROUP_NONE = 0,
+  AGG_EXPR_TYPE_GROUP_NUMERIC,	/* {+,-,x} over NUMERIC; u128 coefficient registers */
+  AGG_EXPR_TYPE_GROUP_INT,		/* SHORT/INTEGER/BIGINT nodes; int64 registers */
+  AGG_EXPR_TYPE_GROUP_DOUBLE	/* DOUBLE nodes (FLOAT only as a leaf); double registers */
+} AGG_EXPR_TYPE_GROUP;
 
-static FETCH_POC_CHAIN_FAMILY fetch_poc_chain_family (const REGU_VARIABLE * regu_var);
-static bool fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY family, int budget);
-static bool fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
-				  QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out);
-static bool fetch_poc_int_from_dbv (const DB_VALUE * dbv, int64_t * out);
-static bool fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
+static AGG_EXPR_TYPE_GROUP fetch_agg_expr_type_group (const REGU_VARIABLE * regu_var);
+static bool fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group, int budget);
+static bool fetch_agg_expr_eval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+				  QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out);
+static bool fetch_agg_expr_int_from_dbv (const DB_VALUE * dbv, int64_t * out);
+static bool fetch_agg_expr_eval_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
 				      OID * obj_oid, QFILE_TUPLE tpl, int64_t * out);
-static bool fetch_poc_dbl_from_dbv (const DB_VALUE * dbv, double *out);
-static bool fetch_poc_eval_dbl_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
+static bool fetch_agg_expr_dbl_from_dbv (const DB_VALUE * dbv, double *out);
+static bool fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
 				      OID * obj_oid, QFILE_TUPLE tpl, double *out);
 
 static bool is_argument_wrapped_with_cast_op (const REGU_VARIABLE * regu_var);
@@ -96,39 +96,39 @@ static int get_year_month_or_day (const DB_VALUE * src_date, OPERATOR_TYPE op, D
 static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
 
 /*
- * fetch_poc_chain_family () - which chain family does this tree's result domain select?
- *   return: the family, or FETCH_POC_CHAIN_NONE
+ * fetch_agg_expr_type_group () - which type group does this tree's result domain select?
+ *   return: the type_group, or AGG_EXPR_TYPE_GROUP_NONE
  *
- * FLOAT selects no family of its own: the legacy path rounds a FLOAT operation's
+ * FLOAT selects no type_group of its own: the legacy path rounds a FLOAT operation's
  * result to float at every step, and only float-by-float evaluation reproduces
  * that.  A FLOAT *leaf* under a DOUBLE tree is fine -- the legacy operator widens
  * it exactly once, which (double) does verbatim.
  */
-static FETCH_POC_CHAIN_FAMILY
-fetch_poc_chain_family (const REGU_VARIABLE * regu_var)
+static AGG_EXPR_TYPE_GROUP
+fetch_agg_expr_type_group (const REGU_VARIABLE * regu_var)
 {
   if (regu_var->domain == NULL)
     {
-      return FETCH_POC_CHAIN_NONE;
+      return AGG_EXPR_TYPE_GROUP_NONE;
     }
 
   switch (TP_DOMAIN_TYPE (regu_var->domain))
     {
     case DB_TYPE_NUMERIC:
-      return FETCH_POC_CHAIN_NUMERIC;
+      return AGG_EXPR_TYPE_GROUP_NUMERIC;
     case DB_TYPE_SHORT:
     case DB_TYPE_INTEGER:
     case DB_TYPE_BIGINT:
-      return FETCH_POC_CHAIN_INT;
+      return AGG_EXPR_TYPE_GROUP_INT;
     case DB_TYPE_DOUBLE:
-      return FETCH_POC_CHAIN_DOUBLE;
+      return AGG_EXPR_TYPE_GROUP_DOUBLE;
     default:
-      return FETCH_POC_CHAIN_NONE;
+      return AGG_EXPR_TYPE_GROUP_NONE;
     }
 }
 
 /*
- * fetch_poc_chain_shape_ok () - can this expression tree be fused in the word domain?
+ * fetch_is_agg_expr_shape () - can this expression tree be fused in the word domain?
  *   return: true if it is a {+,-,x} tree over plain value references
  *   regu_var(in): root of the expression tree
  *   budget(in): remaining recursion allowance
@@ -138,52 +138,52 @@ fetch_poc_chain_family (const REGU_VARIABLE * regu_var)
  * the legacy path without any operand being evaluated twice. A leaf is either a
  * plain value reference or an integer that type checking wrapped for a NUMERIC
  * operator, and reading one has no side effect -- which is what makes that
- * re-evaluation safe: operators such as T_INCR never reach the chain.
+ * re-evaluation safe: operators such as T_INCR never reach the agg-expr path.
  *
- * The chain descends on its own without touching the recursion counter that
+ * The agg-expr walk descends on its own without touching the recursion counter that
  * fetch_peek_arith () maintains, so a tree deep enough to exhaust
  * max_recursion_sql_depth is left to the legacy path -- which raises
- * ER_MAX_RECURSION_SQL_DEPTH for it, as it would without the chain.
+ * ER_MAX_RECURSION_SQL_DEPTH for it, as it would without the agg-expr path.
  */
 bool
-fetch_poc_chain_shape_ok (const REGU_VARIABLE * regu_var, int budget)
+fetch_is_agg_expr_shape (const REGU_VARIABLE * regu_var, int budget)
 {
-  FETCH_POC_CHAIN_FAMILY family;
+  AGG_EXPR_TYPE_GROUP type_group;
   OPERATOR_TYPE op;
 
   /* The root has to be one of the fusable operators, not a cast: a lone cast has nothing
-   * to fuse, and reaching the chain for it would only add a tree walk to what the general
+   * to fuse, and reaching the agg-expr path for it would only add a tree walk to what the general
    * path already does in one step. */
   if (regu_var->type != TYPE_INARITH || regu_var->value.arithptr == NULL)
     {
       return false;
     }
 
-  family = fetch_poc_chain_family (regu_var);
-  if (family == FETCH_POC_CHAIN_NONE)
+  type_group = fetch_agg_expr_type_group (regu_var);
+  if (type_group == AGG_EXPR_TYPE_GROUP_NONE)
     {
       return false;
     }
 
-  /* division stays out of the NUMERIC family alone: its result scale and rounding
+  /* division stays out of the NUMERIC type_group alone: its result scale and rounding
    * rules cannot be reproduced without re-implementing the legacy operator.  An
    * integer division truncates and a double division is one IEEE operation, so
    * the typed families take T_DIV. */
   op = regu_var->value.arithptr->opcode;
-  if (op != T_ADD && op != T_SUB && op != T_MUL && !(op == T_DIV && family != FETCH_POC_CHAIN_NUMERIC))
+  if (op != T_ADD && op != T_SUB && op != T_MUL && !(op == T_DIV && type_group != AGG_EXPR_TYPE_GROUP_NUMERIC))
     {
       return false;
     }
 
-  return fetch_poc_chain_node_ok (regu_var, family, budget);
+  return fetch_is_agg_expr_node (regu_var, type_group, budget);
 }
 
 /*
- * fetch_poc_chain_int_source () - is this the integer side of a widening cast?
+ * fetch_is_agg_expr_int_source () - is this the integer side of a widening cast?
  *   return: true for a SHORT, INTEGER or BIGINT operand
  */
 static bool
-fetch_poc_chain_int_source (const REGU_VARIABLE * regu_var)
+fetch_is_agg_expr_int_source (const REGU_VARIABLE * regu_var)
 {
   if (regu_var->domain == NULL)
     {
@@ -205,11 +205,11 @@ fetch_poc_chain_int_source (const REGU_VARIABLE * regu_var)
 }
 
 /*
- * fetch_poc_chain_node_ok () - the recursive half of fetch_poc_chain_shape_ok ()
- *   return: true if this subtree can be fused under the given family
+ * fetch_is_agg_expr_node () - the recursive half of fetch_is_agg_expr_shape ()
+ *   return: true if this subtree can be fused under the given type_group
  */
 static bool
-fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY family, int budget)
+fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group, int budget)
 {
   const ARITH_TYPE *arithptr;
 
@@ -239,14 +239,14 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY 
       return false;
     }
 
-  if (family != FETCH_POC_CHAIN_NUMERIC)
+  if (type_group != AGG_EXPR_TYPE_GROUP_NUMERIC)
     {
       /* Typed families evaluate every operation in the node's own result domain --
        * an INT node overflows at int32 exactly like the legacy operator -- so each
-       * interior node has to carry a domain of its own family.  A FLOAT interior
+       * interior node has to carry a domain of its own type_group.  A FLOAT interior
        * node would demand per-operation float rounding; it never appears under a
        * DOUBLE root, and rejecting it here keeps that assumption checked. */
-      FETCH_POC_CHAIN_FAMILY node_family = fetch_poc_chain_family (regu_var);
+      AGG_EXPR_TYPE_GROUP node_type_group = fetch_agg_expr_type_group (regu_var);
 
       if (arithptr->opcode == T_CAST_WRAP)
 	{
@@ -254,20 +254,20 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY 
 	   * value and widens it itself, which is the entire cast.  An int widened
 	   * onto BIGINT or DOUBLE is exact the same way it is for NUMERIC below;
 	   * a FLOAT widened onto DOUBLE is one exact conversion. */
-	  if (arithptr->rightptr == NULL || node_family != family)
+	  if (arithptr->rightptr == NULL || node_type_group != type_group)
 	    {
 	      return false;
 	    }
-	  if (fetch_poc_chain_int_source (arithptr->rightptr))
+	  if (fetch_is_agg_expr_int_source (arithptr->rightptr))
 	    {
 	      return true;
 	    }
-	  return (family == FETCH_POC_CHAIN_DOUBLE && arithptr->rightptr->domain != NULL
+	  return (type_group == AGG_EXPR_TYPE_GROUP_DOUBLE && arithptr->rightptr->domain != NULL
 		  && (TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_FLOAT
 		      || TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_NUMERIC));
 	}
 
-      if (node_family != family)
+      if (node_type_group != type_group)
 	{
 	  return false;
 	}
@@ -277,22 +277,22 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY 
 	{
 	  return false;
 	}
-      return (fetch_poc_chain_node_ok (arithptr->leftptr, family, budget - 1)
-	      && fetch_poc_chain_node_ok (arithptr->rightptr, family, budget - 1));
+      return (fetch_is_agg_expr_node (arithptr->leftptr, type_group, budget - 1)
+	      && fetch_is_agg_expr_node (arithptr->rightptr, type_group, budget - 1));
     }
 
   if (arithptr->opcode == T_CAST_WRAP)
     {
-      /* An integer wrapped for a NUMERIC operation is a leaf as far as the chain is
-       * concerned: fetch_poc_eval_chain () loads the integer itself rather than running
+      /* An integer wrapped for a NUMERIC operation is a leaf as far as the agg-expr evaluation is
+       * concerned: fetch_agg_expr_eval () loads the integer itself rather than running
        * the cast, so there is nothing below to walk.  See
-       * numeric_poc_chain_from_int_dbv () for why that reproduces the cast exactly.
+       * numeric_agg_expr_from_int_dbv () for why that reproduces the cast exactly.
        *
        * Only the implicit wrap qualifies.  An explicit T_CAST can narrow, and stepping
        * around it would swallow the overflow it exists to raise.  Every other cast keeps
-       * the whole tree on the legacy path: the chain cannot reproduce a conversion it
+       * the whole tree on the legacy path: the agg-expr evaluation cannot reproduce a conversion it
        * does not perform, and absorbing one as a fetched DB_VALUE was measured to cost
-       * more than it saved -- the cast still builds its DB_VALUE, and the chain then adds
+       * more than it saved -- the cast still builds its DB_VALUE, and the agg-expr evaluation then adds
        * a word conversion on top of it.
        *
        * The target has to be the one pt_coerce_expression_argument () builds for a
@@ -307,7 +307,7 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY 
 	      && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NUMERIC
 	      && regu_var->domain->precision == DB_DEFAULT_NUMERIC_PRECISION
 	      && regu_var->domain->scale == DB_DEFAULT_NUMERIC_SCALE
-	      && fetch_poc_chain_int_source (arithptr->rightptr));
+	      && fetch_is_agg_expr_int_source (arithptr->rightptr));
     }
 
   if (arithptr->leftptr == NULL || arithptr->rightptr == NULL
@@ -316,16 +316,16 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY 
       return false;
     }
 
-  return (fetch_poc_chain_node_ok (arithptr->leftptr, family, budget - 1)
-	  && fetch_poc_chain_node_ok (arithptr->rightptr, family, budget - 1));
+  return (fetch_is_agg_expr_node (arithptr->leftptr, type_group, budget - 1)
+	  && fetch_is_agg_expr_node (arithptr->rightptr, type_group, budget - 1));
 }
 
 /*
- * fetch_poc_eval_chain () - evaluate a {+,-,x} tree entirely in the word domain
+ * fetch_agg_expr_eval () - evaluate a {+,-,x} tree entirely in the word domain
  *   return: true when the whole tree was fused, false to fall back
  *   out(out): fused result
  *
- * Every operand must be a NUMERIC that fits a chain, or an integer that type checking
+ * Every operand must be a NUMERIC that fits an agg-expr value, or an integer that type checking
  * has wrapped for a NUMERIC operator. A bare integer leaf -- one the legacy path would
  * route through numeric_db_value_* instead of float_numeric_db_value_*, deriving
  * precision differently -- is not accepted, and such trees fall back rather than risk a
@@ -333,11 +333,11 @@ fetch_poc_chain_node_ok (const REGU_VARIABLE * regu_var, FETCH_POC_CHAIN_FAMILY 
  * is type checking stating that the operation is a NUMERIC one.
  */
 static bool
-fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
-		      QFILE_TUPLE tpl, NUMERIC_POC_CHAIN_VAL * out)
+fetch_agg_expr_eval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+		      QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out)
 {
   ARITH_TYPE *arithptr;
-  NUMERIC_POC_CHAIN_VAL left, right;
+  NUMERIC_AGG_EXPR_VAL left, right;
 
   if (regu_var->type != TYPE_INARITH)
     {
@@ -348,7 +348,7 @@ fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_des
 	  return false;
 	}
 
-      return numeric_poc_chain_from_dbv (peek_leaf, out);
+      return numeric_agg_expr_from_dbv (peek_leaf, out);
     }
 
   arithptr = regu_var->value.arithptr;
@@ -358,37 +358,37 @@ fetch_poc_eval_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_des
       DB_VALUE *peek_int = NULL;
 
       /* Read the integer the cast would have widened and load it straight into the
-       * chain, leaving the cast node itself unevaluated.  What that skips is the whole
+       * register, leaving the cast node itself unevaluated.  What that skips is the whole
        * conversion: the general path would dispatch through fetch_peek_arith () and pack
-       * a 17-byte NUMERIC into arithptr->value, once per row, only for the chain to
+       * a 17-byte NUMERIC into arithptr->value, once per row, only for the evaluator to
        * unpack it again.  Here it costs an int64 read and a widening. */
       if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_int) != NO_ERROR)
 	{
 	  return false;
 	}
-      return numeric_poc_chain_from_int_dbv (peek_int, out);
+      return numeric_agg_expr_from_int_dbv (peek_int, out);
     }
 
-  if (!fetch_poc_eval_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
-      || !fetch_poc_eval_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+  if (!fetch_agg_expr_eval (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_agg_expr_eval (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
     {
       return false;
     }
 
   if (arithptr->opcode == T_MUL)
     {
-      return numeric_poc_chain_mul (&left, &right, out);
+      return numeric_agg_expr_mul (&left, &right, out);
     }
 
-  return numeric_poc_chain_add (&left, &right, arithptr->opcode == T_SUB, out);
+  return numeric_agg_expr_add (&left, &right, arithptr->opcode == T_SUB, out);
 }
 
 /*
- * fetch_poc_int_from_dbv () - load an integer-family value into an int64 register
+ * fetch_agg_expr_int_from_dbv () - load an integer-type_group value into an int64 register
  *   return: true, or false for a NULL or a non-integer (that row falls back)
  */
 static bool
-fetch_poc_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
+fetch_agg_expr_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
 {
   if (dbv == NULL || DB_IS_NULL (dbv))
     {
@@ -412,7 +412,7 @@ fetch_poc_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
 }
 
 /*
- * fetch_poc_eval_int_chain () - evaluate an integer {+,-,x,/} tree in int64 registers
+ * fetch_agg_expr_eval_int () - evaluate an integer {+,-,x,/} tree in int64 registers
  *   return: true when the whole tree was fused, false to fall back
  *   out(out): the root's value; already verified to fit the root's domain
  *
@@ -424,7 +424,7 @@ fetch_poc_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
  * overflowing quotient (INT64_MIN / -1) fall back the same way.
  */
 static bool
-fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+fetch_agg_expr_eval_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
 			  QFILE_TUPLE tpl, int64_t * out)
 {
   ARITH_TYPE *arithptr;
@@ -438,7 +438,7 @@ fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val
 	{
 	  return false;
 	}
-      return fetch_poc_int_from_dbv (peek_leaf, out);
+      return fetch_agg_expr_int_from_dbv (peek_leaf, out);
     }
 
   arithptr = regu_var->value.arithptr;
@@ -452,11 +452,11 @@ fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val
 	{
 	  return false;
 	}
-      return fetch_poc_int_from_dbv (peek_int, out);
+      return fetch_agg_expr_int_from_dbv (peek_int, out);
     }
 
-  if (!fetch_poc_eval_int_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
-      || !fetch_poc_eval_int_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+  if (!fetch_agg_expr_eval_int (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_agg_expr_eval_int (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
     {
       return false;
     }
@@ -517,7 +517,7 @@ fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val
 }
 
 /*
- * fetch_poc_dbl_from_dbv () - load a value into a double register
+ * fetch_agg_expr_dbl_from_dbv () - load a value into a double register
  *   return: true, or false for a NULL or an unsupported type (that row falls back)
  *
  * An integer or FLOAT leaf widens exactly the way the legacy path widens it --
@@ -525,7 +525,7 @@ fetch_poc_eval_int_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val
  * operator raw.
  */
 static bool
-fetch_poc_dbl_from_dbv (const DB_VALUE * dbv, double *out)
+fetch_agg_expr_dbl_from_dbv (const DB_VALUE * dbv, double *out)
 {
   if (dbv == NULL || DB_IS_NULL (dbv))
     {
@@ -570,7 +570,7 @@ fetch_poc_dbl_from_dbv (const DB_VALUE * dbv, double *out)
 }
 
 /*
- * fetch_poc_eval_dbl_chain () - evaluate a DOUBLE {+,-,x,/} tree in double registers
+ * fetch_agg_expr_eval_dbl () - evaluate a DOUBLE {+,-,x,/} tree in double registers
  *   return: true when the whole tree was fused, false to fall back
  *   out(out): the root's value; finite
  *
@@ -581,7 +581,7 @@ fetch_poc_dbl_from_dbv (const DB_VALUE * dbv, double *out)
  * does a zero divisor.
  */
 static bool
-fetch_poc_eval_dbl_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
 			  QFILE_TUPLE tpl, double *out)
 {
   ARITH_TYPE *arithptr;
@@ -595,7 +595,7 @@ fetch_poc_eval_dbl_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val
 	{
 	  return false;
 	}
-      return fetch_poc_dbl_from_dbv (peek_leaf, out);
+      return fetch_agg_expr_dbl_from_dbv (peek_leaf, out);
     }
 
   arithptr = regu_var->value.arithptr;
@@ -608,11 +608,11 @@ fetch_poc_eval_dbl_chain (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val
 	{
 	  return false;
 	}
-      return fetch_poc_dbl_from_dbv (peek_src, out);
+      return fetch_agg_expr_dbl_from_dbv (peek_src, out);
     }
 
-  if (!fetch_poc_eval_dbl_chain (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
-      || !fetch_poc_eval_dbl_chain (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+  if (!fetch_agg_expr_eval_dbl (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_agg_expr_eval_dbl (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
     {
       return false;
     }
@@ -678,9 +678,9 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 
   assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
 
-  /* POC: an aggregate operand expression is evaluated as one word-domain chain.
+  /* POC: an aggregate operand expression is evaluated as one word-domain pass.
    * The general path materializes a DB_VALUE per operation -- packing the
-   * coefficient and re-deriving precision every time -- where the chain carries
+   * coefficient and re-deriving precision every time -- where the agg-expr evaluation carries
    * the running coefficient in 128 bits and packs a single result here.
    *
    * This is deliberately limited to expressions feeding an aggregate
@@ -690,9 +690,9 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
    * here). General binary arithmetic stays
    * with float_numeric_db_value_* so that each numeric operator keeps a single
    * owner: numeric_db_value_* for the simple cases, float_numeric_db_value_* for
-   * general arithmetic, and the word accumulator plus this chain for aggregation.
+   * general arithmetic, and the word accumulator plus this agg-expr evaluation for aggregation.
    *
-   * The chain writes its one result where the general path would have written it,
+   * The agg-expr evaluation writes its one result where the general path would have written it,
    * so every consumer is unaffected: the tuple descriptor, the aggregate operand
    * that references it, and the group's first_tuple, which a spilling hash
    * aggregation later replays through the sort path.
@@ -704,25 +704,25 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
     {
       bool fused = false;
 
-      switch (fetch_poc_chain_family (regu_var))
+      switch (fetch_agg_expr_type_group (regu_var))
 	{
-	case FETCH_POC_CHAIN_NUMERIC:
+	case AGG_EXPR_TYPE_GROUP_NUMERIC:
 	  {
-	    NUMERIC_POC_CHAIN_VAL chain_val;
+	    NUMERIC_AGG_EXPR_VAL expr_val;
 
-	    if (fetch_poc_eval_chain (thread_p, regu_var, vd, obj_oid, tpl, &chain_val))
+	    if (fetch_agg_expr_eval (thread_p, regu_var, vd, obj_oid, tpl, &expr_val))
 	      {
-		numeric_poc_chain_to_dbv (&chain_val, arithptr->value);
+		numeric_agg_expr_to_dbv (&expr_val, arithptr->value);
 		fused = true;
 	      }
 	  }
 	  break;
 
-	case FETCH_POC_CHAIN_INT:
+	case AGG_EXPR_TYPE_GROUP_INT:
 	  {
 	    int64_t int_val;
 
-	    if (fetch_poc_eval_int_chain (thread_p, regu_var, vd, obj_oid, tpl, &int_val))
+	    if (fetch_agg_expr_eval_int (thread_p, regu_var, vd, obj_oid, tpl, &int_val))
 	      {
 		/* the evaluator verified the value fits the root's domain */
 		switch (TP_DOMAIN_TYPE (regu_var->domain))
@@ -742,11 +742,11 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 	  }
 	  break;
 
-	case FETCH_POC_CHAIN_DOUBLE:
+	case AGG_EXPR_TYPE_GROUP_DOUBLE:
 	  {
 	    double dbl_val;
 
-	    if (fetch_poc_eval_dbl_chain (thread_p, regu_var, vd, obj_oid, tpl, &dbl_val))
+	    if (fetch_agg_expr_eval_dbl (thread_p, regu_var, vd, obj_oid, tpl, &dbl_val))
 	      {
 		db_make_double (arithptr->value, dbl_val);
 		fused = true;

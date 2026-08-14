@@ -340,7 +340,7 @@ regu_init (cubxasl::aggregate_list_node &agg)
   agg.is_ended = false;
   /* execution-only fields; the obstack this comes from is not zeroed */
   agg.accumulator.shared_from = 0;
-  agg.accumulator.num_sum_acc.is_active = false;
+  agg.accumulator.sum_acc.is_active = false;
   std::memset (&agg.info, 0, sizeof (AGGREGATE_SPECIFIC_FUNCTION_INFO));
 
   regu_alloc (agg.accumulator.value);
