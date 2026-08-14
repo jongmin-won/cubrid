@@ -113,8 +113,12 @@
 /* [10^n][multi-precision buffer (uint64_t words, MSB-first, each word in host endianness)] */
 static uint64_t powers_of_10[POW10_MAX_INDEX + 1][POW10_BUF_WORDS];
 
-static const double numeric_Pow_of_10[10] = {
-  1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9
+static const double numeric_Pow_of_10_dbl[DB_MAX_NUMERIC_PRECISION + 1] = {
+  1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+  1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+  1e20, 1e21, 1e22, 1e23, 1e24, 1e25, 1e26, 1e27, 1e28, 1e29,
+  1e30, 1e31, 1e32, 1e33, 1e34, 1e35, 1e36, 1e37, 1e38, 1e39,
+  1e40
 };
 
 /* look-up table : containing pre-calculated 4-byte ASCII representations for numbers 0000-9999. */
@@ -4985,6 +4989,22 @@ numeric_sum_acc_finalize (SUM_ACC * acc, DB_VALUE * result)
  *   adouble(out): ptr to the returned double value
  *
  * Note: This routine converts a DB_C_NUMERIC into a double precision value.
+ *
+ * POC: the gated path converts arithmetically -- coefficient words to a double,
+ * then the same power-of-ten division the string path runs -- instead of
+ * unfolding the coefficient into a 256-character decimal string for atof ().
+ * The results are bit-identical:
+ *
+ *   - a coefficient that fits uint128 converts in one hardware-rounded cast,
+ *     which rounds to nearest exactly as atof () rounds the same integer;
+ *   - a wider coefficient (39..40 digits, upper word nonzero) is folded to
+ *     64 bits with round-to-odd first.  An intermediate of 55 or more bits
+ *     rounded to odd makes the final round-to-nearest land on the digit
+ *     atof () lands on (Boldo-Melquiond), and the 2^k rescale is exact;
+ *   - the divisor comes from a table seeded by pow (10.0, scale) itself.
+ *
+ * Only the coefficient ever becomes a double here: `scale` moves the decimal
+ * point in the double's exponent through the division, never as digits.
  */
 void
 numeric_coerce_num_to_double (const DB_VALUE * num_value, int scale, double *adouble)
@@ -4992,6 +5012,37 @@ numeric_coerce_num_to_double (const DB_VALUE * num_value, int scale, double *ado
   char num_string[TWICE_NUM_MAX_PREC + 2];	/* 2: Sign, Null terminate */
 
   assert (num_value);
+
+  if (numeric_poc_gate_enabled ())
+    {
+      uint64_t words[NUMERIC_AS_WORDS];
+      double magnitude;
+
+      numeric_bytes_to_words (db_locate_numeric (num_value), DB_NUMERIC_BUF_SIZE, words, NUMERIC_AS_WORDS,
+			      NUMERIC_AS_WORD_BYTES);
+
+      if (words[0] == 0)
+	{
+	  magnitude = (double) (((uint128_t) words[1] << 64) | words[2]);
+	}
+      else
+	{
+	  /* a 39..40 digit coefficient takes the same cast, shifted right just
+	   * enough (its bits above uint128) to fit; ldexp puts the 2^shift back */
+	  int shift = 64 - NUMERIC_CLZ64 (words[0]);
+	  uint128_t folded =
+	    ((uint128_t) words[0] << (128 - shift)) | ((uint128_t) words[1] << (64 - shift)) | (words[2] >> shift);
+
+	  /* if anything was shifted out, record it in the lowest bit for the
+	   * cast's rounding (round-to-odd) */
+	  folded |= (uint128_t) ((words[2] & ((1ULL << shift) - 1)) != 0);
+	  magnitude = ldexp ((double) folded, shift);
+	}
+
+      magnitude /= (scale >= 0 && scale <= DB_MAX_NUMERIC_PRECISION) ? numeric_Pow_of_10_dbl[scale] : pow (10.0, scale);
+      *adouble = numeric_is_negative (num_value) ? -magnitude : magnitude;
+      return;
+    }
 
   /* Convert the numeric to a decimal string */
   numeric_coerce_num_to_dec_str (num_value, num_string);
