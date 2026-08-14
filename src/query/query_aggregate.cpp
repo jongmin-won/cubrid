@@ -184,8 +184,18 @@ qdata_agg_expr_eval (const REGU_VARIABLE *regu, NUMERIC_AGG_EXPR_VAL *out)
 	}
     }
 
-  if (arith->leftptr == NULL || arith->rightptr == NULL
-      || (arith->opcode != T_ADD && arith->opcode != T_SUB && arith->opcode != T_MUL))
+  switch (arith->opcode)
+    {
+    case T_ADD:
+    case T_SUB:
+    case T_MUL:
+      break;
+    default:
+      /* everything else -- division included -- falls back to the legacy path */
+      return false;
+    }
+
+  if (arith->leftptr == NULL || arith->rightptr == NULL)
     {
       return false;
     }
@@ -977,18 +987,14 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 
 	  /* ---- NUMERIC only -------------------------------------------------
 	   * Evaluate a {+,-,x} argument tree whole in the word domain, so not even
-	   * one DB_VALUE is built.  There is no type test here because is_active is
-	   * itself the type gate: it means "a NUMERIC value has already been
-	   * accumulated".  numeric_sum_acc_add_dbv () is the only thing that turns it
-	   * on -- directly or through numeric_sum_acc_accumulate () -- and every call to
-	   * it sits behind a NUMERIC check; the agg-expr entry point
-	   * (numeric_sum_acc_add_expr_val ()) asserts is_active instead of seeding.
+	   * one DB_VALUE is built.  sum_type picks the word mode: a typed sum
+	   * (INT/DOUBLE) fails the test and takes the peek path below.  Nothing here
+	   * can seed -- is_active turns on only under qdata_sum_acc_start () and
+	   * numeric_sum_acc_add_dbv ()'s first-value branch, both behind a type
+	   * check, and the agg-expr entry point (numeric_sum_acc_add_expr_val ())
+	   * asserts is_active instead of seeding.
 	   *
-	   * A purely integer argument therefore never gets here: its first row fails
-	   * the NUMERIC test below, is_active stays off, and this branch stays
-	   * unreachable for the rest of the group.
-	   *
-	   * Note the flag says nothing about *this* row -- an expression or a host
+	   * Note the fields say nothing about *this* row -- an expression or a host
 	   * variable can change type per row, which is why the peek path below still
 	   * tests the value itself. */
 	  if (accumulator->sum_acc.is_active && accumulator->sum_acc.sum_type == DB_TYPE_NUMERIC
@@ -1022,40 +1028,26 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	      continue;
 	    }
 
-	  /* ---- NUMERIC only -------------------------------------------------
-	   * The word accumulator is live, so feed it directly and skip the
-	   * per-function dispatch. */
-	  if (accumulator->sum_acc.is_active)
+	  /* ---- accumulator live: NUMERIC or typed ---------------------------
+	   * The running sum is already in the accumulator and this value is of
+	   * its mode, so feed it directly and skip the per-function dispatch.
+	   * sum_acc_sum_type_for () covers both worlds -- NUMERIC maps to the
+	   * word mode, a type it does not take maps to DB_TYPE_NULL and falls
+	   * to the outer call below. */
+	  if (accumulator->sum_acc.is_active
+	      && accumulator->sum_acc.sum_type == sum_acc_sum_type_for (DB_VALUE_DOMAIN_TYPE (peek_val)))
 	    {
-	      DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (peek_val);
-
-	      if (vtype == DB_TYPE_NUMERIC && accumulator->sum_acc.sum_type == DB_TYPE_NUMERIC)
+	      if (qdata_sum_acc_add_dbv (&accumulator->sum_acc, peek_val) != NO_ERROR)
 		{
-		  if (numeric_sum_acc_add_dbv (&accumulator->sum_acc, peek_val) != NO_ERROR)
-		    {
-		      return ER_FAILED;
-		    }
-
-		  accumulator->curr_cnt++;
-		  continue;
+		  return ER_FAILED;
 		}
 
-	      /* typed (SHORT/INT/BIGINT/DOUBLE/FLOAT) sum: one add against the type's
-	       * own range check, skipping the per-function dispatch */
-	      if (vtype != DB_TYPE_NUMERIC && accumulator->sum_acc.sum_type == sum_acc_sum_type_for (vtype))
-		{
-		  if (qdata_sum_acc_add_typed (&accumulator->sum_acc, peek_val) != NO_ERROR)
-		    {
-		      return ER_FAILED;
-		    }
-
-		  accumulator->curr_cnt++;
-		  continue;
-		}
+	      accumulator->curr_cnt++;
+	      continue;
 	    }
 
-	  /* outer: a first value, a reinstated partial, or any non-NUMERIC type.  This
-	   * is the same call the general path below would reach. */
+	  /* outer: a first value, a reinstated partial, or a type the accumulator
+	   * does not take.  This is the same call the general path below would reach. */
 	  error = qdata_aggregate_value_to_accumulator (thread_p, accumulator, &agg_p->accumulator_domain,
 		  agg_p->function, agg_p->domain, peek_val, false);
 	  if (error != NO_ERROR)

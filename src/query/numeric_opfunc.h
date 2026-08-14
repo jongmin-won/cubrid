@@ -228,8 +228,7 @@ extern void numeric_agg_expr_to_dbv (const NUMERIC_AGG_EXPR_VAL * cv, DB_VALUE *
 
 extern bool numeric_poc_gate_enabled (void);
 extern int numeric_sum_acc_add_dbv (SUM_ACC * acc, const DB_VALUE * dbv);
-extern int numeric_sum_acc_accumulate (SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from,
-				       const DB_VALUE * value);
+extern void numeric_sum_acc_load_dbv (SUM_ACC * acc, const DB_VALUE * dbv);
 extern int numeric_sum_acc_merge (SUM_ACC * acc, const SUM_ACC * other);
 extern int numeric_sum_acc_add_expr_val (SUM_ACC * acc, const NUMERIC_AGG_EXPR_VAL * val);
 extern int numeric_sum_acc_snapshot (const SUM_ACC * acc, DB_VALUE * result);

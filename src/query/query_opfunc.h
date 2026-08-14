@@ -72,7 +72,7 @@ extern int qdata_add_dbval (DB_VALUE * dbval1, DB_VALUE * dbval2, DB_VALUE * res
  * (NUMERIC) mode and the typed (SHORT/INT/BIGINT/DOUBLE/FLOAT) mode */
 extern int qdata_sum_acc_accumulate (SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from,
 				     const DB_VALUE * value);
-extern int qdata_sum_acc_add_typed (SUM_ACC * acc, const DB_VALUE * dbv);
+extern int qdata_sum_acc_add_dbv (SUM_ACC * acc, const DB_VALUE * dbv);
 extern int qdata_sum_acc_merge (SUM_ACC * acc, const SUM_ACC * other);
 extern int qdata_sum_acc_snapshot (const SUM_ACC * acc, DB_VALUE * result);
 extern int qdata_sum_acc_finalize (SUM_ACC * acc, DB_VALUE * result);

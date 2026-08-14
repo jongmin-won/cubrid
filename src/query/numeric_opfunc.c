@@ -316,7 +316,6 @@ static void numeric_bytes_to_words (const uint8_t * src, int src_bytes, uint64_t
 static void numeric_words_to_bytes (const uint64_t * src, int src_words, uint8_t * dest);
 static int numeric_sum_acc_add_core (SUM_ACC * acc, uint64_t * val_words, int val_used, int val_scale,
 				     bool val_neg);
-static void numeric_sum_acc_load_dbv (SUM_ACC * acc, const DB_VALUE * dbv);
 static void numeric_agg_expr_from_u128 (uint128_t coefficient, int scale, bool is_negative, NUMERIC_AGG_EXPR_VAL * out);
 static int numeric_sum_acc_add_rounded (SUM_ACC * acc, const DB_VALUE * val_dbv);
 
@@ -4134,10 +4133,10 @@ float_numeric_normalize_for_hash (DB_C_NUMERIC num, uint8_t * calc_buf, int prec
  *   acc(in/out) : word accumulator; overwritten and activated
  *   dbv(in)     : NUMERIC value to load
  *
- * Used for the first value of a group and to reload the result of a
- * legacy-rounded add (numeric_sum_acc_add_rounded ()).
+ * Used for the first value of a group (through qdata_sum_acc_start ()) and to
+ * reload the result of a legacy-rounded add (numeric_sum_acc_add_rounded ()).
  */
-static void
+void
 numeric_sum_acc_load_dbv (SUM_ACC * acc, const DB_VALUE * dbv)
 {
   int prec, scale;
@@ -4277,7 +4276,7 @@ numeric_sum_acc_add_dbv (SUM_ACC * acc, const DB_VALUE * dbv)
  *
  *   A source that came back from a spill file cannot be merged this way: the words do
  *   not fit the list file's three columns, so they were already finalized on the way
- *   out. That path stays with numeric_sum_acc_accumulate ()'s seed.
+ *   out. That path stays with qdata_sum_acc_accumulate ()'s seed.
  */
 int
 numeric_sum_acc_merge (SUM_ACC * acc, const SUM_ACC * other)
@@ -4310,61 +4309,6 @@ numeric_sum_acc_merge (SUM_ACC * acc, const SUM_ACC * other)
       return numeric_sum_acc_add_rounded (acc, &other_dbv);
     }
   return ret;
-}
-
-/*
- * numeric_sum_acc_accumulate () - accumulate one NUMERIC value, first reconciling the
- *                                 accumulator with the caller's running DB_VALUE
- *   return: NO_ERROR, or ER_FAILED
- *   acc(in/out)   : word accumulator
- *   is_first(in)  : true if value is the first one of the group / partition.  seed_from
- *                   is then ignored: there is nothing to reconcile yet, and the caller's
- *                   running value still belongs to the previous group
- *   seed_from(in) : where the caller keeps its running value, or NULL if the caller has
- *                   no path that can strand a partial sum there.  A NUMERIC found here
- *                   while the accumulator is empty is a running sum the accumulator does
- *                   not have -- flattened by numeric_sum_acc_finalize () on the way into
- *                   a spill file, and reloaded as a plain DB_VALUE.  Fold it in first or
- *                   it is lost
- *   value(in)     : the NUMERIC value to accumulate
- *
- * Note:
- *   - value always reaches the accumulator, including the first one of a group.  The
- *     alternative -- parking the first value in the caller's running DB_VALUE and
- *     seeding from it on the next row -- is NOT safe for every caller: the analytic
- *     path finalizes mid-partition and AVG overwrites its running value with a DOUBLE
- *     there, so a value parked there would be gone by the next row.
- */
-int
-numeric_sum_acc_accumulate (SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from,
-			    const DB_VALUE * value)
-{
-  assert (acc != NULL && value != NULL);
-
-  if (is_first)
-    {
-      /* new group: discard whatever word state the previous one left behind */
-      acc->is_active = false;
-    }
-  else if (acc->is_active && acc->sum_type != DB_TYPE_NUMERIC)
-    {
-      /* a NUMERIC value while the running sum is typed (qdata_sum_acc_* owns that
-       * mode): the operand type is fixed per query, so this is unreachable --
-       * guard it rather than corrupt silently */
-      assert (false);
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
-      return ER_FAILED;
-    }
-  else if (seed_from != NULL && !acc->is_active && DB_VALUE_DOMAIN_TYPE (seed_from) == DB_TYPE_NUMERIC
-	   && !DB_IS_NULL (seed_from))
-    {
-      if (numeric_sum_acc_add_dbv (acc, seed_from) != NO_ERROR)
-	{
-	  return ER_FAILED;
-	}
-    }
-
-  return numeric_sum_acc_add_dbv (acc, value);
 }
 
 /*

@@ -2748,18 +2748,21 @@ qdata_add_dbval (DB_VALUE * dbval1_p, DB_VALUE * dbval2_p, DB_VALUE * result_p, 
  */
 
 /*
- * qdata_sum_acc_start_typed () - first value of a typed group
+ * qdata_sum_acc_start () - open the accumulator on the first value of a group
  *   return: NO_ERROR, or ER_FAILED on a type the accumulator does not take
- *   acc(in/out) : accumulator; becomes active in typed mode
- *   dbv(in)     : first SHORT/INTEGER/BIGINT/DOUBLE/FLOAT value; not NULL-valued
+ *   acc(in/out) : accumulator; becomes active in the value's mode
+ *   dbv(in)     : first NUMERIC/SHORT/INTEGER/BIGINT/DOUBLE/FLOAT value; not NULL-valued
  */
 static int
-qdata_sum_acc_start_typed (SUM_ACC * acc, const DB_VALUE * dbv)
+qdata_sum_acc_start (SUM_ACC * acc, const DB_VALUE * dbv)
 {
   DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (dbv);
 
   switch (vtype)
     {
+    case DB_TYPE_NUMERIC:
+      numeric_sum_acc_load_dbv (acc, dbv);
+      return NO_ERROR;
     case DB_TYPE_SHORT:
       acc->int_sum = (int64_t) db_get_short (dbv);
       break;
@@ -2787,34 +2790,43 @@ qdata_sum_acc_start_typed (SUM_ACC * acc, const DB_VALUE * dbv)
 }
 
 /*
- * qdata_sum_acc_add_typed () - add one value to an accumulator in typed mode
+ * qdata_sum_acc_add_dbv () - add one value to an active accumulator
  *   return: NO_ERROR, or ER_QPROC_OVERFLOW_ADDITION exactly where the legacy
  *           per-row addition would have raised it
- *   acc(in/out) : active accumulator in typed mode; sum_type matches the value's type
+ *   acc(in/out) : active accumulator; sum_type matches the value's type
  *   dbv(in)     : the value; not NULL-valued
  */
 int
-qdata_sum_acc_add_typed (SUM_ACC * acc, const DB_VALUE * dbv)
+qdata_sum_acc_add_dbv (SUM_ACC * acc, const DB_VALUE * dbv)
 {
   DB_TYPE vtype;
 
   assert (acc != NULL && acc->is_active && dbv != NULL);
 
   vtype = DB_VALUE_DOMAIN_TYPE (dbv);
-  assert (acc->sum_type == sum_acc_sum_type_for (vtype));
+  if (acc->sum_type != sum_acc_sum_type_for (vtype))
+    {
+      /* a type flip mid-group cannot happen in a planned query -- the operand
+       * type is fixed -- so this only defends against silent corruption */
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
 
   switch (vtype)
     {
+    case DB_TYPE_NUMERIC:
+      return numeric_sum_acc_add_dbv (acc, dbv);
     case DB_TYPE_SHORT:
       acc->int_sum += (int64_t) db_get_short (dbv);
-      if (acc->int_sum > DB_INT16_MAX || acc->int_sum < DB_INT16_MIN)
+      if (OR_CHECK_SHORT_OVERFLOW (acc->int_sum))
 	{
 	  goto overflow;
 	}
       break;
     case DB_TYPE_INTEGER:
       acc->int_sum += (int64_t) db_get_int (dbv);
-      if (acc->int_sum > DB_INT32_MAX || acc->int_sum < DB_INT32_MIN)
+      if (OR_CHECK_INT_OVERFLOW (acc->int_sum))
 	{
 	  goto overflow;
 	}
@@ -2867,49 +2879,36 @@ overflow:
  *                   back that way); fold it in first or it is lost
  *   value(in)     : the value to accumulate; not NULL-valued
  *
- * Note: the type flips the guards below reject cannot happen in a planned
- * query -- the operand type is fixed -- so they only defend against silent
- * corruption, the same stance the NUMERIC-only path takes.
+ * Note: value always reaches the accumulator, including the first one of a
+ * group.  The alternative -- parking the first value in the caller's running
+ * DB_VALUE and seeding from it on the next row -- is NOT safe for every
+ * caller: the analytic path finalizes mid-partition and AVG overwrites its
+ * running value with a DOUBLE there, so a value parked there would be gone by
+ * the next row.
+ *
  */
 int
 qdata_sum_acc_accumulate (SUM_ACC * acc, bool is_first, const DB_VALUE * seed_from, const DB_VALUE * value)
 {
-  DB_TYPE vtype;
-
   assert (acc != NULL && value != NULL);
-
-  vtype = DB_VALUE_DOMAIN_TYPE (value);
-
-  if (vtype == DB_TYPE_NUMERIC)
-    {
-      return numeric_sum_acc_accumulate (acc, is_first, seed_from, value);
-    }
 
   if (is_first)
     {
+      /* new group: discard whatever state the previous one left behind */
       acc->is_active = false;
     }
   else if (seed_from != NULL && !acc->is_active && !DB_IS_NULL (seed_from)
-	   && DB_VALUE_DOMAIN_TYPE (seed_from) != DB_TYPE_NUMERIC
 	   && sum_acc_sum_type_for (DB_VALUE_DOMAIN_TYPE (seed_from)) != DB_TYPE_NULL)
     {
-      if (qdata_sum_acc_start_typed (acc, seed_from) != NO_ERROR)
+      /* an empty accumulator under a running value: a spilled partial sum came
+       * back as a plain DB_VALUE -- fold it in first or it is lost */
+      if (qdata_sum_acc_start (acc, seed_from) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
     }
 
-  if (!acc->is_active)
-    {
-      return qdata_sum_acc_start_typed (acc, value);
-    }
-  if (acc->sum_type != sum_acc_sum_type_for (vtype))
-    {
-      assert (false);
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
-      return ER_FAILED;
-    }
-  return qdata_sum_acc_add_typed (acc, value);
+  return acc->is_active ? qdata_sum_acc_add_dbv (acc, value) : qdata_sum_acc_start (acc, value);
 }
 
 /*
