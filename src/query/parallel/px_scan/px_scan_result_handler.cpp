@@ -1618,7 +1618,7 @@ namespace parallel_scan
 	 * its own accumulator; finalize_node () merges it through
 	 * qdata_aggregate_accumulator_to_accumulator (), which knows how to drain it.
 	 * acc->value still keeps the first value so its domain information survives. */
-	if (numeric_poc_gate_enabled () && SUM_ACC_IS_INPUT_TYPE (DB_VALUE_DOMAIN_TYPE (db_value_p)))
+	if (numeric_poc_gate_enabled () && SUM_ACC_IS_AGG_SUPPORTED_TYPE (DB_VALUE_DOMAIN_TYPE (db_value_p)))
 	  {
 	    if (acc->curr_cnt < 1)
 	      {

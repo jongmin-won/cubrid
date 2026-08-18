@@ -84,8 +84,13 @@ struct sum_acc
   DB_TYPE sum_type;		/* accumulation domain; valid only while is_active */
 };
 
+/* The two tests below are the accumulator's own contract -- what the box takes and
+ * under which mode -- and the accumulator core (qdata_sum_acc_start/add_dbv/
+ * accumulate) uses them directly.  The aggregate and analytic ENTRY policies wrap
+ * them under their own names further down; entry code tests those, never these. */
+
 /* the input types the accumulator takes; everything else stays legacy */
-#define SUM_ACC_IS_INPUT_TYPE(t) \
+#define SUM_ACC_IS_SUPPORTED_TYPE(t) \
   ((t) == DB_TYPE_NUMERIC || (t) == DB_TYPE_INTEGER || (t) == DB_TYPE_BIGINT \
    || (t) == DB_TYPE_SHORT || (t) == DB_TYPE_DOUBLE || (t) == DB_TYPE_FLOAT)
 
@@ -105,6 +110,42 @@ sum_acc_sum_type_for (DB_TYPE t)
       return t;
     case DB_TYPE_FLOAT:
       return DB_TYPE_DOUBLE;
+    default:
+      return DB_TYPE_NULL;
+    }
+}
+
+/* aggregate entry policy: the aggregate path takes everything the accumulator
+ * takes, so these are the contract under its own name */
+#define SUM_ACC_IS_AGG_SUPPORTED_TYPE(t) SUM_ACC_IS_SUPPORTED_TYPE (t)
+
+static inline DB_TYPE
+sum_acc_agg_sum_type_for (DB_TYPE t)
+{
+  return sum_acc_sum_type_for (t);
+}
+
+/* analytic entry policy: FLOAT is refused even though the accumulator itself
+ * takes it -- the analytic legacy accumulates in the result domain, so a FLOAT
+ * argument really is summed float-by-float (rounded to float after every add,
+ * overflowing at FLT_MAX mid-partition), and double accumulation cannot
+ * reproduce that.  Spelled out standalone: layering a FLOAT override on top of
+ * the contract map leaves an extra compare in the generated code. */
+#define SUM_ACC_IS_ANALYTIC_SUPPORTED_TYPE(t) \
+  ((t) == DB_TYPE_NUMERIC || (t) == DB_TYPE_INTEGER || (t) == DB_TYPE_BIGINT \
+   || (t) == DB_TYPE_SHORT || (t) == DB_TYPE_DOUBLE)
+
+static inline DB_TYPE
+sum_acc_analytic_sum_type_for (DB_TYPE t)
+{
+  switch (t)
+    {
+    case DB_TYPE_NUMERIC:
+    case DB_TYPE_SHORT:
+    case DB_TYPE_INTEGER:
+    case DB_TYPE_BIGINT:
+    case DB_TYPE_DOUBLE:
+      return t;
     default:
       return DB_TYPE_NULL;
     }

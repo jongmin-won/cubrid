@@ -167,11 +167,12 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
   db_make_null (&dbval);
   db_make_null (&sqr_val);
 
-  /* POC: a SUM/AVG whose word accumulator is already running only reads its
-   * operand, so peek it instead of deep-copying a DB_VALUE per row (the
-   * aggregate path does the same).  The first value of a partition, a
-   * reinstated partial, a NULL and any non-NUMERIC value keep the general path
-   * below, which fetches its own copy and clears it on the way out. */
+  /* POC: a SUM/AVG whose accumulator is already running only reads its
+   * operand, so peek it instead of deep-copying a DB_VALUE per row -- the same
+   * test and the same call the aggregate path makes on its re-entry.  The
+   * first value of a partition, a reinstated partial and a NULL keep the
+   * general path below, which fetches its own copy and clears it on the way
+   * out. */
   if (qdata_analytic_numeric_sum_acc_enabled () && qdata_analytic_is_plain_sum_avg (func_p)
       && func_p->curr_cnt >= 1 && func_p->sum_acc.is_active)
     {
@@ -182,9 +183,10 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 	  return ER_FAILED;
 	}
 
-      if (!DB_IS_NULL (peek_operand_p) && DB_VALUE_DOMAIN_TYPE (peek_operand_p) == DB_TYPE_NUMERIC)
+      if (!DB_IS_NULL (peek_operand_p)
+	  && func_p->sum_acc.sum_type == sum_acc_analytic_sum_type_for (DB_VALUE_DOMAIN_TYPE (peek_operand_p)))
 	{
-	  if (numeric_sum_acc_add_dbv (&func_p->sum_acc, peek_operand_p) != NO_ERROR)
+	  if (qdata_sum_acc_add_dbv (&func_p->sum_acc, peek_operand_p) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -412,14 +414,10 @@ qdata_evaluate_analytic_func (cubthread::entry *thread_p, ANALYTIC_TYPE *func_p,
 	 * emitted as a rounded snapshot of the exact sum at each sort key group boundary
 	 * (qdata_finalize_analytic_func), so every emitted value is drift-free and the
 	 * last one matches the aggregate SUM. */
-	/* FLOAT stays legacy here, unlike the aggregate path: an analytic SUM/AVG
-	 * accumulates in its result domain, so a FLOAT argument really is summed
-	 * float-by-float -- rounded to float after every add, overflowing at
-	 * FLT_MAX mid-partition -- and only that reproduces it.  (The aggregate
-	 * path accumulates a FLOAT argument as DOUBLE; see qdata_sum_acc_*.) */
+	/* FLOAT stays legacy here, unlike the aggregate path -- see the analytic
+	 * entry policy in query_sum_accumulator.h for why. */
 	bool use_sum_acc = (qdata_analytic_numeric_sum_acc_enabled ()
-			     && SUM_ACC_IS_INPUT_TYPE (DB_VALUE_DOMAIN_TYPE (&dbval))
-			     && DB_VALUE_DOMAIN_TYPE (&dbval) != DB_TYPE_FLOAT);
+			     && SUM_ACC_IS_ANALYTIC_SUPPORTED_TYPE (DB_VALUE_DOMAIN_TYPE (&dbval)));
 
 	if (func_p->curr_cnt < 1)
 	  {

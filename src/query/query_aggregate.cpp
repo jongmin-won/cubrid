@@ -620,7 +620,7 @@ qdata_aggregate_value_to_accumulator (cubthread::entry *thread_p, cubxasl::aggre
 	 * is still needed), so anything that needs the running sum has to finalize the
 	 * accumulator first rather than read acc->value. */
 	bool use_sum_acc = (qdata_numeric_sum_acc_enabled ()
-			    && SUM_ACC_IS_INPUT_TYPE (DB_VALUE_DOMAIN_TYPE (value)));
+			    && SUM_ACC_IS_AGG_SUPPORTED_TYPE (DB_VALUE_DOMAIN_TYPE (value)));
 
 	if (acc->curr_cnt < 1)
 	  {
@@ -1100,11 +1100,11 @@ qdata_evaluate_aggregate_list (cubthread::entry *thread_p, cubxasl::aggregate_li
 	  /* ---- accumulator live: NUMERIC or typed ---------------------------
 	   * The running sum is already in the accumulator and this value is of
 	   * its mode, so feed it directly and skip the per-function dispatch.
-	   * sum_acc_sum_type_for () covers both worlds -- NUMERIC maps to the
+	   * sum_acc_agg_sum_type_for () covers both worlds -- NUMERIC maps to the
 	   * word mode, a type it does not take maps to DB_TYPE_NULL and falls
 	   * to the outer call below. */
 	  if (accumulator->sum_acc.is_active
-	      && accumulator->sum_acc.sum_type == sum_acc_sum_type_for (DB_VALUE_DOMAIN_TYPE (peek_val)))
+	      && accumulator->sum_acc.sum_type == sum_acc_agg_sum_type_for (DB_VALUE_DOMAIN_TYPE (peek_val)))
 	    {
 	      if (qdata_sum_acc_add_dbv (&accumulator->sum_acc, peek_val) != NO_ERROR)
 		{
