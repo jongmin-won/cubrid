@@ -817,7 +817,7 @@ qdata_agg_is_plain_sum_avg (const cubxasl::aggregate_list_node *agg_p)
 
 /*
  * qdata_agg_may_share_accumulator () - can this aggregate take part in accumulator sharing?
- *   return: true for a plain SUM/AVG over a single referenced value
+ *   return: true for a plain SUM/AVG over a single referenced value or arithmetic expression
  */
 static inline bool
 qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
@@ -827,10 +827,77 @@ qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
    * either (same block in xasl_generation.c, gated on COUNT_STAR/MIN/MAX): unlike
    * min_max_optimized it makes qdata_evaluate_aggregate_list () skip the aggregate
    * outright, so a sharer pointing at one would copy an accumulator nobody ever filled.
-   * This runs once per query, so the check is free. */
+   * This runs once per query, so the check is free.  Whether a TYPE_INARITH argument
+   * really qualifies is settled by qdata_agg_share_args_equal (), which walks the tree. */
   return (qdata_agg_is_plain_sum_avg (agg_p) && !agg_p->flag.agg_optimized
-	  && agg_p->operands->value.type == TYPE_CONSTANT && agg_p->operands->value.value.dbvalptr != NULL
+	  && (agg_p->operands->value.type == TYPE_CONSTANT || agg_p->operands->value.type == TYPE_INARITH)
 	  && agg_p->accumulator_domain.value_dom != NULL);
+}
+
+/*
+ * qdata_agg_share_args_equal () - do two aggregate arguments carry the identical
+ *                                 value on every row?
+ *   return: true when the regu trees are structurally the same computation
+ *
+ * Deliberately conservative, position for position: a constant leaf must point at
+ * the very same DB_VALUE, an arithmetic node must apply the same whitelisted
+ * operator to pairwise-equal operands in the same order -- no commutative
+ * normalization, so SUM(a+b) and AVG(b+a) do not share, matching what
+ * pt_aggregate_arg_eq () accepts when GROUP BY deduplicates arguments -- and the
+ * domains must match at every node so both sides coerce identically.  Anything
+ * else (functions, casts, predicates, a third operand) compares unequal and the
+ * pair simply forgoes sharing.  Note the whitelist admits T_DIV: sharing only
+ * skips a duplicated evaluation, so it does not care whether the owner
+ * accumulates through the fast path or through the per-row fallback.
+ */
+static bool
+qdata_agg_share_args_equal (const regu_variable_node *arg, const regu_variable_node *other)
+{
+  if (arg == NULL || other == NULL)
+    {
+      return false;
+    }
+
+  if (arg->type != other->type || arg->domain != other->domain)
+    {
+      return false;
+    }
+
+  switch (arg->type)
+    {
+    case TYPE_CONSTANT:
+      return (arg->value.dbvalptr != NULL && arg->value.dbvalptr == other->value.dbvalptr);
+
+    case TYPE_INARITH:
+      {
+	const ARITH_TYPE *arith = arg->value.arithptr;
+	const ARITH_TYPE *other_arith = other->value.arithptr;
+
+	if (arith == NULL || other_arith == NULL || arith->opcode != other_arith->opcode
+	    || arith->domain != other_arith->domain || arith->pred != NULL || other_arith->pred != NULL
+	    || arith->thirdptr != NULL || other_arith->thirdptr != NULL)
+	  {
+	    return false;
+	  }
+
+	switch (arith->opcode)
+	  {
+	  case T_ADD:
+	  case T_SUB:
+	  case T_MUL:
+	  case T_DIV:
+	    break;
+	  default:
+	    return false;
+	  }
+
+	return (qdata_agg_share_args_equal (arith->leftptr, other_arith->leftptr)
+		&& qdata_agg_share_args_equal (arith->rightptr, other_arith->rightptr));
+      }
+
+    default:
+      return false;
+    }
 }
 
 /*
@@ -846,11 +913,13 @@ qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
  * one and stops accumulating; at finalize time it copies the accumulated state
  * from that owner and finishes on its own.
  *
- * Two aggregates share only if their argument is literally the same DB_VALUE,
- * both are a plain SUM or AVG, and they accumulate into the same domain -- an
- * integer SUM accumulates as an integer while its AVG may not.  Must run after
- * the accumulator domains are resolved, and is called once per query on the
- * serial path and once per worker on the parallel path.
+ * Two aggregates share only if their arguments compute the identical value on
+ * every row -- literally the same DB_VALUE, or the same pure arithmetic tree
+ * over the same leaves (qdata_agg_share_args_equal ()) -- both are a plain SUM
+ * or AVG, and they accumulate into the same domain: an integer SUM accumulates
+ * as an integer while its AVG may not.  Must run after the accumulator domains
+ * are resolved, and is called once per query on the serial path and once per
+ * worker on the parallel path.
  */
 void
 qdata_link_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
@@ -875,8 +944,8 @@ qdata_link_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
       for (owner_p = agg_list, owner_index = 0; owner_p != agg_p; owner_p = owner_p->next, owner_index++)
 	{
 	  if (owner_p->accumulator.shared_from == 0 && qdata_agg_may_share_accumulator (owner_p)
-	      && owner_p->operands->value.value.dbvalptr == agg_p->operands->value.value.dbvalptr
-	      && owner_p->accumulator_domain.value_dom == agg_p->accumulator_domain.value_dom)
+	      && owner_p->accumulator_domain.value_dom == agg_p->accumulator_domain.value_dom
+	      && qdata_agg_share_args_equal (&owner_p->operands->value, &agg_p->operands->value))
 	    {
 	      agg_p->accumulator.shared_from = owner_index + 1;
 	      break;
