@@ -21302,57 +21302,53 @@ qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
 	      REGU_VARIABLE_SET_FLAG (&agg_p->operands->value, REGU_VARIABLE_AGG_OPERAND);
 	    }
 	}
-      return;
     }
-
-  if (xasl->type != BUILDLIST_PROC)
+  else if (xasl->type == BUILDLIST_PROC)
     {
-      return;
-    }
+      /* Analytic SUM/AVG is deliberately not covered, and the reason is not obvious enough to
+       * leave unwritten -- four attempts at flagging it all measured zero agg-expr calls:
+       *
+       *   func_p->operand          pt_to_analytic_node () always builds it as TYPE_CONSTANT
+       *                            pointing at an a_val_list slot (xasl_generation.c), so it is
+       *                            never an expression
+       *   a_eval_list              same thing, reached from the other side
+       *   a_outptr_list_ex         the output list, not what evaluates the operand
+       *   a_scan_regu_list         where the expression really is by construction -- it fills
+       *                            the slot during the scan, before the sort the analytic needs
+       *                            -- and flagging it still produced no agg-expr call
+       *
+       * A flat query (no derived table) behaves the same, so it is not a matter of the marking
+       * failing to reach an inner XASL either.  Whatever consumes those regu variables does not
+       * route through fetch_peek_arith (), and that is where the next attempt should start
+       * looking.  The accumulator itself works on the analytic path; only this fusion does not. */
 
-  /* Analytic SUM/AVG is deliberately not covered, and the reason is not obvious enough to
-   * leave unwritten -- four attempts at flagging it all measured zero agg-expr calls:
-   *
-   *   func_p->operand          pt_to_analytic_node () always builds it as TYPE_CONSTANT
-   *                            pointing at an a_val_list slot (xasl_generation.c), so it is
-   *                            never an expression
-   *   a_eval_list              same thing, reached from the other side
-   *   a_outptr_list_ex         the output list, not what evaluates the operand
-   *   a_scan_regu_list         where the expression really is by construction -- it fills
-   *                            the slot during the scan, before the sort the analytic needs
-   *                            -- and flagging it still produced no agg-expr call
-   *
-   * A flat query (no derived table) behaves the same, so it is not a matter of the marking
-   * failing to reach an inner XASL either.  Whatever consumes those regu variables does not
-   * route through fetch_peek_arith (), and that is where the next attempt should start
-   * looking.  The accumulator itself works on the analytic path; only this fusion does not. */
-
-  agg_list = xasl->proc.buildlist.g_agg_list;
-  outptr_list = xasl->outptr_list;
-  if (agg_list == NULL || outptr_list == NULL)
-    {
-      return;
-    }
-
-  for (regu_p = outptr_list->valptrp; regu_p != NULL; regu_p = regu_p->next)
-    {
-      if (regu_p->value.type != TYPE_INARITH || regu_p->value.vfetch_to == NULL)
+      agg_list = xasl->proc.buildlist.g_agg_list;
+      outptr_list = xasl->outptr_list;
+      if (agg_list == NULL || outptr_list == NULL)
 	{
-	  continue;
+	  return;
 	}
 
-      for (agg_p = agg_list; agg_p != NULL; agg_p = agg_p->next)
+      for (regu_p = outptr_list->valptrp; regu_p != NULL; regu_p = regu_p->next)
 	{
-	  if (agg_p->operands != NULL && agg_p->operands->value.type == TYPE_CONSTANT
-	      && agg_p->operands->value.value.dbvalptr == regu_p->value.vfetch_to)
+	  if (regu_p->value.type != TYPE_INARITH || regu_p->value.vfetch_to == NULL)
 	    {
-	      /* The tree shape is fixed for the whole query, so settle it here and
-	       * let the row path test one flag instead of walking the tree again. */
-	      if (fetch_is_agg_expr_shape (&regu_p->value, budget))
+	      continue;
+	    }
+
+	  for (agg_p = agg_list; agg_p != NULL; agg_p = agg_p->next)
+	    {
+	      if (agg_p->operands != NULL && agg_p->operands->value.type == TYPE_CONSTANT
+		  && agg_p->operands->value.value.dbvalptr == regu_p->value.vfetch_to)
 		{
-		  REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
+		  /* The tree shape is fixed for the whole query, so settle it here and
+		   * let the row path test one flag instead of walking the tree again. */
+		  if (fetch_is_agg_expr_shape (&regu_p->value, budget))
+		    {
+		      REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
+		    }
+		  break;
 		}
-	      break;
 	    }
 	}
     }

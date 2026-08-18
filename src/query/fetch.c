@@ -75,20 +75,20 @@ typedef enum
 {
   AGG_EXPR_TYPE_GROUP_NONE = 0,
   AGG_EXPR_TYPE_GROUP_NUMERIC,	/* {+,-,x} over NUMERIC; u128 coefficient registers */
-  AGG_EXPR_TYPE_GROUP_INT,		/* SHORT/INTEGER/BIGINT nodes; int64 registers */
+  AGG_EXPR_TYPE_GROUP_INT,	/* SHORT/INTEGER/BIGINT nodes; int64 registers */
   AGG_EXPR_TYPE_GROUP_DOUBLE	/* DOUBLE nodes (FLOAT only as a leaf); double registers */
 } AGG_EXPR_TYPE_GROUP;
 
 static AGG_EXPR_TYPE_GROUP fetch_agg_expr_type_group (const REGU_VARIABLE * regu_var);
 static bool fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group, int budget);
 static bool fetch_agg_expr_eval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
-				  QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out);
+				 QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out);
 static bool fetch_agg_expr_int_from_dbv (const DB_VALUE * dbv, int64_t * out);
 static bool fetch_agg_expr_eval_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
-				      OID * obj_oid, QFILE_TUPLE tpl, int64_t * out);
+				     OID * obj_oid, QFILE_TUPLE tpl, int64_t * out);
 static bool fetch_agg_expr_dbl_from_dbv (const DB_VALUE * dbv, double *out);
 static bool fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
-				      OID * obj_oid, QFILE_TUPLE tpl, double *out);
+				     OID * obj_oid, QFILE_TUPLE tpl, double *out);
 
 static bool is_argument_wrapped_with_cast_op (const REGU_VARIABLE * regu_var);
 static int get_hour_minute_or_second (const DB_VALUE * datetime, OPERATOR_TYPE op_type, DB_VALUE * db_value);
@@ -126,6 +126,15 @@ fetch_agg_expr_type_group (const REGU_VARIABLE * regu_var)
       return AGG_EXPR_TYPE_GROUP_NONE;
     }
 }
+
+/* The operators a fused tree may contain: {+, -, x} in every type group, and
+ * division outside NUMERIC alone -- an integer division truncates and a double
+ * division is one IEEE operation, while a NUMERIC division's result scale and
+ * rounding rules cannot be reproduced without re-implementing the legacy
+ * operator. */
+#define FETCH_IS_AGG_EXPR_OP(op, group) \
+  ((op) == T_ADD || (op) == T_SUB || (op) == T_MUL \
+   || ((op) == T_DIV && (group) != AGG_EXPR_TYPE_GROUP_NUMERIC))
 
 /*
  * fetch_is_agg_expr_shape () - can this expression tree be fused in the word domain?
@@ -165,12 +174,8 @@ fetch_is_agg_expr_shape (const REGU_VARIABLE * regu_var, int budget)
       return false;
     }
 
-  /* division stays out of the NUMERIC type_group alone: its result scale and rounding
-   * rules cannot be reproduced without re-implementing the legacy operator.  An
-   * integer division truncates and a double division is one IEEE operation, so
-   * the typed families take T_DIV. */
   op = regu_var->value.arithptr->opcode;
-  if (op != T_ADD && op != T_SUB && op != T_MUL && !(op == T_DIV && type_group != AGG_EXPR_TYPE_GROUP_NUMERIC))
+  if (!FETCH_IS_AGG_EXPR_OP (op, type_group))
     {
       return false;
     }
@@ -202,6 +207,67 @@ fetch_is_agg_expr_int_source (const REGU_VARIABLE * regu_var)
        * never a wrong answer */
       return false;
     }
+}
+
+/*
+ * fetch_is_agg_expr_wrap_leaf () - can this T_CAST_WRAP node stand as a leaf?
+ *   return: true when the evaluator may absorb the wrap and read its source directly
+ *
+ * For the NUMERIC group: an integer wrapped for a NUMERIC operation is a leaf as far
+ * as the agg-expr evaluation is concerned -- fetch_agg_expr_eval () loads the integer
+ * itself rather than running the cast, so there is nothing below to walk.  See
+ * numeric_agg_expr_from_int_dbv () for why that reproduces the cast exactly.
+ *
+ * Only the implicit wrap qualifies.  An explicit T_CAST can narrow, and stepping
+ * around it would swallow the overflow it exists to raise.  Every other cast keeps
+ * the whole tree on the legacy path: the agg-expr evaluation cannot reproduce a
+ * conversion it does not perform, and absorbing one as a fetched DB_VALUE was
+ * measured to cost more than it saved -- the cast still builds its DB_VALUE, and the
+ * agg-expr evaluation then adds a word conversion on top of it.
+ *
+ * The target has to be the one pt_coerce_expression_argument () builds for a
+ * NUMERIC common type.  Not every wrap uses it: where an argument is typed
+ * PT_TYPE_MAYBE, pt_eval_expr_type () wraps it onto the other operand's data type
+ * instead, which can carry a scale.  Casting an integer onto NUMERIC(15, 2) is
+ * still exact but places the digits two positions over, so those trees are left
+ * alone.  Comparing against the default precision and scale is enough to tell the
+ * two apart, and it costs nothing at run time -- the shape is settled once per
+ * query, in qexec_mark_aggregate_operand_expressions ().
+ *
+ * For the typed groups: the implicit widening wrap is absorbed the same way -- the
+ * evaluator reads the source value and widens it itself, which is the entire cast.
+ * An int widened onto BIGINT or DOUBLE is exact just as it is for NUMERIC, and a
+ * FLOAT widened onto DOUBLE is one exact conversion.
+ */
+static bool
+fetch_is_agg_expr_wrap_leaf (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group)
+{
+  const ARITH_TYPE *arithptr = regu_var->value.arithptr;
+
+  if (arithptr->rightptr == NULL)
+    {
+      return false;
+    }
+
+  if (type_group == AGG_EXPR_TYPE_GROUP_NUMERIC)
+    {
+      return (regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NUMERIC
+	      && regu_var->domain->precision == DB_DEFAULT_NUMERIC_PRECISION
+	      && regu_var->domain->scale == DB_DEFAULT_NUMERIC_SCALE
+	      && fetch_is_agg_expr_int_source (arithptr->rightptr));
+    }
+
+  if (fetch_agg_expr_type_group (regu_var) != type_group)
+    {
+      return false;
+    }
+  if (fetch_is_agg_expr_int_source (arithptr->rightptr))
+    {
+      return true;
+    }
+  return (type_group == AGG_EXPR_TYPE_GROUP_DOUBLE && arithptr->rightptr->domain != NULL
+	  && (TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_FLOAT
+	      || TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_NUMERIC));
 }
 
 /*
@@ -239,79 +305,26 @@ fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type
       return false;
     }
 
-  if (type_group != AGG_EXPR_TYPE_GROUP_NUMERIC)
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      /* a wrap either stands as a leaf or disqualifies the tree; the per-group
+       * rules live in fetch_is_agg_expr_wrap_leaf () */
+      return fetch_is_agg_expr_wrap_leaf (regu_var, type_group);
+    }
+
+  if (type_group != AGG_EXPR_TYPE_GROUP_NUMERIC && fetch_agg_expr_type_group (regu_var) != type_group)
     {
       /* Typed families evaluate every operation in the node's own result domain --
        * an INT node overflows at int32 exactly like the legacy operator -- so each
        * interior node has to carry a domain of its own type_group.  A FLOAT interior
        * node would demand per-operation float rounding; it never appears under a
        * DOUBLE root, and rejecting it here keeps that assumption checked. */
-      AGG_EXPR_TYPE_GROUP node_type_group = fetch_agg_expr_type_group (regu_var);
-
-      if (arithptr->opcode == T_CAST_WRAP)
-	{
-	  /* the implicit widening wrap is absorbed: the evaluator reads the source
-	   * value and widens it itself, which is the entire cast.  An int widened
-	   * onto BIGINT or DOUBLE is exact the same way it is for NUMERIC below;
-	   * a FLOAT widened onto DOUBLE is one exact conversion. */
-	  if (arithptr->rightptr == NULL || node_type_group != type_group)
-	    {
-	      return false;
-	    }
-	  if (fetch_is_agg_expr_int_source (arithptr->rightptr))
-	    {
-	      return true;
-	    }
-	  return (type_group == AGG_EXPR_TYPE_GROUP_DOUBLE && arithptr->rightptr->domain != NULL
-		  && (TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_FLOAT
-		      || TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_NUMERIC));
-	}
-
-      if (node_type_group != type_group)
-	{
-	  return false;
-	}
-      if (arithptr->leftptr == NULL || arithptr->rightptr == NULL
-	  || (arithptr->opcode != T_ADD && arithptr->opcode != T_SUB && arithptr->opcode != T_MUL
-	      && arithptr->opcode != T_DIV))
-	{
-	  return false;
-	}
-      return (fetch_is_agg_expr_node (arithptr->leftptr, type_group, budget - 1)
-	      && fetch_is_agg_expr_node (arithptr->rightptr, type_group, budget - 1));
+      return false;
     }
 
-  if (arithptr->opcode == T_CAST_WRAP)
-    {
-      /* An integer wrapped for a NUMERIC operation is a leaf as far as the agg-expr evaluation is
-       * concerned: fetch_agg_expr_eval () loads the integer itself rather than running
-       * the cast, so there is nothing below to walk.  See
-       * numeric_agg_expr_from_int_dbv () for why that reproduces the cast exactly.
-       *
-       * Only the implicit wrap qualifies.  An explicit T_CAST can narrow, and stepping
-       * around it would swallow the overflow it exists to raise.  Every other cast keeps
-       * the whole tree on the legacy path: the agg-expr evaluation cannot reproduce a conversion it
-       * does not perform, and absorbing one as a fetched DB_VALUE was measured to cost
-       * more than it saved -- the cast still builds its DB_VALUE, and the agg-expr evaluation then adds
-       * a word conversion on top of it.
-       *
-       * The target has to be the one pt_coerce_expression_argument () builds for a
-       * NUMERIC common type.  Not every wrap uses it: where an argument is typed
-       * PT_TYPE_MAYBE, pt_eval_expr_type () wraps it onto the other operand's data type
-       * instead, which can carry a scale.  Casting an integer onto NUMERIC(15, 2) is
-       * still exact but places the digits two positions over, so those trees are left
-       * alone.  Comparing against the default precision and scale is enough to tell the
-       * two apart, and it costs nothing at run time -- the shape is settled once per
-       * query, in qexec_mark_aggregate_operand_expressions (). */
-      return (arithptr->rightptr != NULL && regu_var->domain != NULL
-	      && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NUMERIC
-	      && regu_var->domain->precision == DB_DEFAULT_NUMERIC_PRECISION
-	      && regu_var->domain->scale == DB_DEFAULT_NUMERIC_SCALE
-	      && fetch_is_agg_expr_int_source (arithptr->rightptr));
-    }
-
-  if (arithptr->leftptr == NULL || arithptr->rightptr == NULL
-      || (arithptr->opcode != T_ADD && arithptr->opcode != T_SUB && arithptr->opcode != T_MUL))
+  /* common descent: both groups walk the children the same way once the
+   * operands are present and the operator is fusable for this group */
+  if (arithptr->leftptr == NULL || arithptr->rightptr == NULL || !FETCH_IS_AGG_EXPR_OP (arithptr->opcode, type_group))
     {
       return false;
     }
@@ -334,7 +347,7 @@ fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type
  */
 static bool
 fetch_agg_expr_eval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
-		      QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out)
+		     QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out)
 {
   ARITH_TYPE *arithptr;
   NUMERIC_AGG_EXPR_VAL left, right;
@@ -425,7 +438,7 @@ fetch_agg_expr_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
  */
 static bool
 fetch_agg_expr_eval_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
-			  QFILE_TUPLE tpl, int64_t * out)
+			 QFILE_TUPLE tpl, int64_t * out)
 {
   ARITH_TYPE *arithptr;
   int64_t left, right, result;
@@ -582,7 +595,7 @@ fetch_agg_expr_dbl_from_dbv (const DB_VALUE * dbv, double *out)
  */
 static bool
 fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
-			  QFILE_TUPLE tpl, double *out)
+			 QFILE_TUPLE tpl, double *out)
 {
   ARITH_TYPE *arithptr;
   double left, right, result;

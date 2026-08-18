@@ -847,7 +847,7 @@ qdata_agg_may_share_accumulator (const cubxasl::aggregate_list_node *agg_p)
  * domains must match at every node so both sides coerce identically.  Anything
  * else (functions, casts, predicates, a third operand) compares unequal and the
  * pair simply forgoes sharing.  Note the whitelist admits T_DIV: sharing only
- * skips a duplicated evaluation, so it does not care whether the owner
+ * skips a duplicated evaluation, so it does not care whether the accumulator owner
  * accumulates through the fast path or through the per-row fallback.
  */
 static bool
@@ -911,7 +911,7 @@ qdata_agg_share_args_equal (const regu_variable_node *arg, const regu_variable_n
  * (find_compatible_pertrans(); sum(numeric) and avg(numeric) both use
  * numeric_avg_accum).  Here the later aggregate records the index of the earlier
  * one and stops accumulating; at finalize time it copies the accumulated state
- * from that owner and finishes on its own.
+ * from that accumulator owner and finishes on its own.
  *
  * Two aggregates share only if their arguments compute the identical value on
  * every row -- literally the same DB_VALUE, or the same pure arithmetic tree
@@ -924,8 +924,8 @@ qdata_agg_share_args_equal (const regu_variable_node *arg, const regu_variable_n
 void
 qdata_link_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
 {
-  cubxasl::aggregate_list_node *agg_p, *owner_p;
-  int index, owner_index;
+  cubxasl::aggregate_list_node *agg_p, *acc_owner_p;
+  int index, acc_owner_index;
 
   if (!qdata_numeric_sum_acc_enabled ())
     {
@@ -941,13 +941,13 @@ qdata_link_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
 	  continue;
 	}
 
-      for (owner_p = agg_list, owner_index = 0; owner_p != agg_p; owner_p = owner_p->next, owner_index++)
+      for (acc_owner_p = agg_list, acc_owner_index = 0; acc_owner_p != agg_p; acc_owner_p = acc_owner_p->next, acc_owner_index++)
 	{
-	  if (owner_p->accumulator.shared_from == 0 && qdata_agg_may_share_accumulator (owner_p)
-	      && owner_p->accumulator_domain.value_dom == agg_p->accumulator_domain.value_dom
-	      && qdata_agg_share_args_equal (&owner_p->operands->value, &agg_p->operands->value))
+	  if (acc_owner_p->accumulator.shared_from == 0 && qdata_agg_may_share_accumulator (acc_owner_p)
+	      && acc_owner_p->accumulator_domain.value_dom == agg_p->accumulator_domain.value_dom
+	      && qdata_agg_share_args_equal (&acc_owner_p->operands->value, &agg_p->operands->value))
 	    {
-	      agg_p->accumulator.shared_from = owner_index + 1;
+	      agg_p->accumulator.shared_from = acc_owner_index + 1;
 	      break;
 	    }
 	}
@@ -1759,7 +1759,7 @@ qdata_agg_node_at (cubxasl::aggregate_list_node *agg_list, int index)
 static int
 qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
 {
-  cubxasl::aggregate_list_node *agg_p, *owner_p;
+  cubxasl::aggregate_list_node *agg_p, *acc_owner_p;
 
   if (!qdata_numeric_sum_acc_enabled ())
     {
@@ -1776,22 +1776,22 @@ qdata_propagate_shared_accumulators (cubxasl::aggregate_list_node *agg_list)
 	  continue;
 	}
 
-      owner_p = qdata_agg_node_at (agg_list, agg_p->accumulator.shared_from - 1);
-      if (owner_p == NULL)
+      acc_owner_p = qdata_agg_node_at (agg_list, agg_p->accumulator.shared_from - 1);
+      if (acc_owner_p == NULL)
 	{
 	  assert (false);
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
 	  return ER_FAILED;
 	}
 
-      agg_p->accumulator.curr_cnt = owner_p->accumulator.curr_cnt;
-      agg_p->accumulator.sum_acc = owner_p->accumulator.sum_acc;
-      if (!owner_p->accumulator.sum_acc.is_active)
+      agg_p->accumulator.curr_cnt = acc_owner_p->accumulator.curr_cnt;
+      agg_p->accumulator.sum_acc = acc_owner_p->accumulator.sum_acc;
+      if (!acc_owner_p->accumulator.sum_acc.is_active)
 	{
-	  /* the owner never reached the word accumulator (a non-NUMERIC value, or a
+	  /* the accumulator owner never reached the word accumulator (a non-NUMERIC value, or a
 	   * fallback); its running value carries the sum instead */
 	  pr_clear_value (agg_p->accumulator.value);
-	  if (pr_clone_value (owner_p->accumulator.value, agg_p->accumulator.value) != NO_ERROR)
+	  if (pr_clone_value (acc_owner_p->accumulator.value, agg_p->accumulator.value) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -3067,19 +3067,19 @@ qdata_save_agg_hentry_to_list (cubthread::entry *thread_p, aggregate_hash_key *k
    * SUM sharing the same accumulation must not inherit. */
   for (i = 0; i < value->func_count; i++)
     {
-      int owner = value->accumulators[i].shared_from - 1;
+      int acc_owner = value->accumulators[i].shared_from - 1;
 
-      if (owner < 0 || owner >= value->func_count)
+      if (acc_owner < 0 || acc_owner >= value->func_count)
 	{
 	  continue;
 	}
 
-      value->accumulators[i].curr_cnt = value->accumulators[owner].curr_cnt;
-      value->accumulators[i].sum_acc = value->accumulators[owner].sum_acc;
-      if (!value->accumulators[owner].sum_acc.is_active)
+      value->accumulators[i].curr_cnt = value->accumulators[acc_owner].curr_cnt;
+      value->accumulators[i].sum_acc = value->accumulators[acc_owner].sum_acc;
+      if (!value->accumulators[acc_owner].sum_acc.is_active)
 	{
 	  pr_clear_value (value->accumulators[i].value);
-	  if (pr_clone_value (value->accumulators[owner].value, value->accumulators[i].value) != NO_ERROR)
+	  if (pr_clone_value (value->accumulators[acc_owner].value, value->accumulators[i].value) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }

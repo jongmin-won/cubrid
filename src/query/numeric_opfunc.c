@@ -4598,7 +4598,7 @@ static int
 numeric_digits_u128 (uint128_t coefficient)
 {
   uint64_t hi = (uint64_t) (coefficient >> 64);
-  int bits = (hi != 0) ? (128 - __builtin_clzll (hi)) : (64 - __builtin_clzll ((uint64_t) coefficient | 1));
+  int bits = (hi != 0) ? (128 - NUMERIC_CLZ64 (hi)) : (64 - NUMERIC_CLZ64 ((uint64_t) coefficient | 1));
   int digits = ((bits - 1) * 1233 >> 12) + 1;
 
   while (digits <= NUMERIC_AGG_EXPR_POW10_MAX_EXP && coefficient >= _gv_numeric_agg_expr_pow10_u128[digits])
