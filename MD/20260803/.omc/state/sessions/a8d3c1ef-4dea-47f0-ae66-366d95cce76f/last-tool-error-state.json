@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd MD/20260803 && mv poc_numeric_sum_acc_results.md details_0731_0804.md && ls\",\"description\":\"Archive detailed log\"}",
+  "error": "Exit code 1\n/bin/bash: line 0: cd: MD/20260803: No such file or directory",
+  "timestamp": "2026-08-04T07:27:30.965Z",
+  "retry_count": 1
+}

@@ -1,0 +1,12 @@
+
+Time: 08/04/26 16:53:06.419 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_sr.c, line 3303  CODE = -972, Tran = -1, EID = 4
+Program 'csql' (pid 3574163) was connected from the host 'jmwon215'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+
+
+Time: 08/04/26 16:53:07.878 - NOTIFICATION *** file /home/cubrid/github/cubrid/src/transaction/boot_sr.c, line 3303  CODE = -972, Tran = -1, EID = 4
+Program 'csql' (pid 3574277) was connected from the host 'jmwon215'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+

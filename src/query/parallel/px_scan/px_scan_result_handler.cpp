@@ -36,6 +36,7 @@
 #include "db_json.hpp"
 #include "query_aggregate.hpp"
 #include "xasl_aggregate.hpp"
+#include "numeric_opfunc.h"	// POC: word accumulator
 #include "object_domain.h"
 #include "query_executor.h"
 #include "px_scan_trace_handler.hpp"
@@ -835,6 +836,12 @@ namespace parallel_scan
 			m_interrupt_p->set_code (parallel_query::interrupt::interrupt_code::ERROR_INTERRUPTED_FROM_WORKER_THREAD);
 			return false;
 		      }
+
+		    /* A worker evaluates the output expressions on its own XASL, so the
+		     * aggregate operand marking of the serial path does not reach it.
+		     * Mark them here, once per worker, exactly like the domains above. */
+		    qexec_mark_aggregate_operand_expressions (tl.xasl);
+		    qdata_link_shared_accumulators (tl.xasl->proc.buildlist.g_agg_list);
 		  }
 		if (qexec_hash_gby_agg_tuple_public (thread_p, tl.xasl, tl.vd->xasl_state, &tl.tpl_buf,
 						     & (tl.writer_result_p->tpl_descr), tl.writer_result_p, &output_tuple) != NO_ERROR)
@@ -1275,6 +1282,12 @@ namespace parallel_scan
   template <FUNC_CODE F>
   bool result_handler<RESULT_TYPE::BUILDVALUE_OPT>::initialize_node (THREAD_ENTRY *thread_p, AGGREGATE_TYPE *agg_node)
   {
+    /* POC: the worker starts with no word accumulator; accumulate_node () turns it on
+     * when the first NUMERIC value arrives.  Done before any early return because the
+     * worker XASL comes from stx_alloc_struct (), which does not zero the buffer --
+     * mirrors qdata_initialize_aggregate_list () on the serial side. */
+    agg_node->accumulator.sum_acc.is_active = false;
+
     if constexpr (F == PT_COUNT_STAR)
       {
 	agg_node->accumulator.curr_cnt = 0;
@@ -1600,6 +1613,44 @@ namespace parallel_scan
 	      }
 	    acc_dom->value2_dom = &tp_Null_domain;
 	  }
+	/* POC: NUMERIC values go into the word accumulator, exactly as the serial and
+	 * BUILDLIST paths do in qdata_aggregate_value_to_accumulator ().  This worker owns
+	 * its own accumulator; finalize_node () merges it through
+	 * qdata_aggregate_accumulator_to_accumulator (), which knows how to drain it.
+	 * acc->value still keeps the first value so its domain information survives. */
+	if (numeric_poc_gate_enabled () && SUM_ACC_IS_AGG_SUPPORTED_TYPE (DB_VALUE_DOMAIN_TYPE (db_value_p)))
+	  {
+	    if (acc->curr_cnt < 1)
+	      {
+		pr_clear_value (acc->value);
+		if (pr_clone_value (db_value_p, acc->value) != NO_ERROR)
+		  {
+		    return false;
+		  }
+	      }
+
+	    /* no seed source: this accumulator belongs to one worker and never leaves
+	     * memory, so acc->value can never hold a partial sum the words do not have */
+	    if (qdata_sum_acc_accumulate (&acc->sum_acc, acc->curr_cnt < 1, NULL, db_value_p) != NO_ERROR)
+	      {
+		return false;
+	      }
+
+	    acc->curr_cnt++;
+	    return true;
+	  }
+
+	/* A live word accumulator means acc->value holds only the first value, not the
+	 * running sum, so the legacy branch below would add onto the wrong base and the
+	 * two partial sums would then fight over the result. The operand type is fixed
+	 * per query, so this is unreachable -- guard it rather than corrupt silently. */
+	if (acc->sum_acc.is_active)
+	  {
+	    assert (false);
+	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+	    return false;
+	  }
+
 	if (acc->curr_cnt < 1)
 	  {
 	    DB_TYPE type = DB_VALUE_DOMAIN_TYPE (db_value_p);
@@ -1955,10 +2006,29 @@ namespace parallel_scan
 	  {
 	    return false;
 	  }
+
+	if (tl_xasl_p->proc.buildvalue.agg_domains_resolved)
+	  {
+	    /* Sharing needs the accumulator domains, so it is decided right after they
+	     * resolve -- the same spot the serial BUILDVALUE path and the parallel
+	     * BUILDLIST worker use.  This worker links its own list; rows a worker
+	     * accumulated into a sharer before this point (leading NULLs can delay the
+	     * resolve) are discarded when the main thread's propagate overwrites the
+	     * sharer with the owner's state, so they cost work but never correctness. */
+	    qdata_link_shared_accumulators (tl_xasl_p->proc.buildvalue.agg_list);
+	  }
       }
     for (AGGREGATE_TYPE *agg_node = tl_xasl_p->proc.buildvalue.agg_list; agg_node != NULL; agg_node = agg_node->next)
       {
 	AGGREGATE_ACCUMULATOR *acc = &agg_node->accumulator;
+
+	if (numeric_poc_gate_enabled () && acc->shared_from > 0)
+	  {
+	    /* an earlier aggregate accumulates this same sum; the state is copied from
+	     * it at finalize time (qdata_propagate_shared_accumulators ()).  skipping
+	     * here also skips the operand fetch below. */
+	    continue;
+	  }
 
 	if (agg_node->function == PT_COUNT_STAR)
 	  {

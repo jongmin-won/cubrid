@@ -41,6 +41,7 @@
 #include "object_primitive.h"
 #include "object_representation.h"
 #include "arithmetic.h"
+#include "numeric_opfunc.h"
 #include "serial.h"
 #include "session.h"
 #include "string_opfunc.h"
@@ -67,10 +68,598 @@ static int fetch_peek_min_max_value_of_width_bucket_func (THREAD_ENTRY * thread_
 							  val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl,
 							  DB_VALUE ** min, DB_VALUE ** max);
 
+/* The type group an aggregate operand tree evaluates under, derived from the
+ * root's result domain.  The shape is validated per type_group once per query, at
+ * marking time; the run-time hook re-derives the type_group with one switch. */
+typedef enum
+{
+  AGG_EXPR_TYPE_GROUP_NONE = 0,
+  AGG_EXPR_TYPE_GROUP_NUMERIC,	/* {+,-,x} over NUMERIC; u128 coefficient registers */
+  AGG_EXPR_TYPE_GROUP_INT,	/* SHORT/INTEGER/BIGINT nodes; int64 registers */
+  AGG_EXPR_TYPE_GROUP_DOUBLE	/* DOUBLE nodes (FLOAT only as a leaf); double registers */
+} AGG_EXPR_TYPE_GROUP;
+
+static AGG_EXPR_TYPE_GROUP fetch_agg_expr_type_group (const REGU_VARIABLE * regu_var);
+static bool fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group, int budget);
+static bool fetch_agg_expr_eval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+				 QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out);
+static bool fetch_agg_expr_int_from_dbv (const DB_VALUE * dbv, int64_t * out);
+static bool fetch_agg_expr_eval_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
+				     OID * obj_oid, QFILE_TUPLE tpl, int64_t * out);
+static bool fetch_agg_expr_dbl_from_dbv (const DB_VALUE * dbv, double *out);
+static bool fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd,
+				     OID * obj_oid, QFILE_TUPLE tpl, double *out);
+
 static bool is_argument_wrapped_with_cast_op (const REGU_VARIABLE * regu_var);
 static int get_hour_minute_or_second (const DB_VALUE * datetime, OPERATOR_TYPE op_type, DB_VALUE * db_value);
 static int get_year_month_or_day (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
 static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
+
+/*
+ * fetch_agg_expr_type_group () - which type group does this tree's result domain select?
+ *   return: the type_group, or AGG_EXPR_TYPE_GROUP_NONE
+ *
+ * FLOAT selects no type_group of its own: the legacy path rounds a FLOAT operation's
+ * result to float at every step, and only float-by-float evaluation reproduces
+ * that.  A FLOAT *leaf* under a DOUBLE tree is fine -- the legacy operator widens
+ * it exactly once, which (double) does verbatim.
+ */
+static AGG_EXPR_TYPE_GROUP
+fetch_agg_expr_type_group (const REGU_VARIABLE * regu_var)
+{
+  if (regu_var->domain == NULL)
+    {
+      return AGG_EXPR_TYPE_GROUP_NONE;
+    }
+
+  switch (TP_DOMAIN_TYPE (regu_var->domain))
+    {
+    case DB_TYPE_NUMERIC:
+      return AGG_EXPR_TYPE_GROUP_NUMERIC;
+    case DB_TYPE_SHORT:
+    case DB_TYPE_INTEGER:
+    case DB_TYPE_BIGINT:
+      return AGG_EXPR_TYPE_GROUP_INT;
+    case DB_TYPE_DOUBLE:
+      return AGG_EXPR_TYPE_GROUP_DOUBLE;
+    default:
+      return AGG_EXPR_TYPE_GROUP_NONE;
+    }
+}
+
+/* The operators a fused tree may contain: {+, -, x} in every type group, and
+ * division outside NUMERIC alone -- an integer division truncates and a double
+ * division is one IEEE operation, while a NUMERIC division's result scale and
+ * rounding rules cannot be reproduced without re-implementing the legacy
+ * operator. */
+#define FETCH_IS_AGG_EXPR_OP(op, group) \
+  ((op) == T_ADD || (op) == T_SUB || (op) == T_MUL \
+   || ((op) == T_DIV && (group) != AGG_EXPR_TYPE_GROUP_NUMERIC))
+
+/*
+ * fetch_is_agg_expr_shape () - can this expression tree be fused in the word domain?
+ *   return: true if it is a {+,-,x} tree over plain value references
+ *   regu_var(in): root of the expression tree
+ *   budget(in): remaining recursion allowance
+ *
+ * The shape is checked before any operand is read, so that a tree which only
+ * turns out to be unfusable later (a value too wide, say) can be re-evaluated by
+ * the legacy path without any operand being evaluated twice. A leaf is either a
+ * plain value reference or an integer that type checking wrapped for a NUMERIC
+ * operator, and reading one has no side effect -- which is what makes that
+ * re-evaluation safe: operators such as T_INCR never reach the agg-expr path.
+ *
+ * The agg-expr walk descends on its own without touching the recursion counter that
+ * fetch_peek_arith () maintains, so a tree deep enough to exhaust
+ * max_recursion_sql_depth is left to the legacy path -- which raises
+ * ER_MAX_RECURSION_SQL_DEPTH for it, as it would without the agg-expr path.
+ */
+bool
+fetch_is_agg_expr_shape (const REGU_VARIABLE * regu_var, int budget)
+{
+  AGG_EXPR_TYPE_GROUP type_group;
+  OPERATOR_TYPE op;
+
+  /* The root has to be one of the fusable operators, not a cast: a lone cast has nothing
+   * to fuse, and reaching the agg-expr path for it would only add a tree walk to what the general
+   * path already does in one step. */
+  if (regu_var->type != TYPE_INARITH || regu_var->value.arithptr == NULL)
+    {
+      return false;
+    }
+
+  type_group = fetch_agg_expr_type_group (regu_var);
+  if (type_group == AGG_EXPR_TYPE_GROUP_NONE)
+    {
+      return false;
+    }
+
+  op = regu_var->value.arithptr->opcode;
+  if (!FETCH_IS_AGG_EXPR_OP (op, type_group))
+    {
+      return false;
+    }
+
+  return fetch_is_agg_expr_node (regu_var, type_group, budget);
+}
+
+/*
+ * fetch_is_agg_expr_int_source () - is this the integer side of a widening cast?
+ *   return: true for a SHORT, INTEGER or BIGINT operand
+ */
+static bool
+fetch_is_agg_expr_int_source (const REGU_VARIABLE * regu_var)
+{
+  if (regu_var->domain == NULL)
+    {
+      return false;
+    }
+
+  switch (TP_DOMAIN_TYPE (regu_var->domain))
+    {
+    case DB_TYPE_SHORT:
+    case DB_TYPE_INTEGER:
+    case DB_TYPE_BIGINT:
+      return true;
+    default:
+      /* the domain only decides whether to try; the value's own type is checked again
+       * when it is read, so a domain that turns out to be wrong costs a fallback and
+       * never a wrong answer */
+      return false;
+    }
+}
+
+/*
+ * fetch_is_agg_expr_wrap_leaf () - can this T_CAST_WRAP node stand as a leaf?
+ *   return: true when the evaluator may absorb the wrap and read its source directly
+ *
+ * For the NUMERIC group: an integer wrapped for a NUMERIC operation is a leaf as far
+ * as the agg-expr evaluation is concerned -- fetch_agg_expr_eval () loads the integer
+ * itself rather than running the cast, so there is nothing below to walk.  See
+ * numeric_agg_expr_from_int_dbv () for why that reproduces the cast exactly.
+ *
+ * Only the implicit wrap qualifies.  An explicit T_CAST can narrow, and stepping
+ * around it would swallow the overflow it exists to raise.  Every other cast keeps
+ * the whole tree on the legacy path: the agg-expr evaluation cannot reproduce a
+ * conversion it does not perform, and absorbing one as a fetched DB_VALUE was
+ * measured to cost more than it saved -- the cast still builds its DB_VALUE, and the
+ * agg-expr evaluation then adds a word conversion on top of it.
+ *
+ * The target has to be the one pt_coerce_expression_argument () builds for a
+ * NUMERIC common type.  Not every wrap uses it: where an argument is typed
+ * PT_TYPE_MAYBE, pt_eval_expr_type () wraps it onto the other operand's data type
+ * instead, which can carry a scale.  Casting an integer onto NUMERIC(15, 2) is
+ * still exact but places the digits two positions over, so those trees are left
+ * alone.  Comparing against the default precision and scale is enough to tell the
+ * two apart, and it costs nothing at run time -- the shape is settled once per
+ * query, in qexec_mark_aggregate_operand_expressions ().
+ *
+ * For the typed groups: the implicit widening wrap is absorbed the same way -- the
+ * evaluator reads the source value and widens it itself, which is the entire cast.
+ * An int widened onto BIGINT or DOUBLE is exact just as it is for NUMERIC, and a
+ * FLOAT widened onto DOUBLE is one exact conversion.
+ */
+static bool
+fetch_is_agg_expr_wrap_leaf (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group)
+{
+  const ARITH_TYPE *arithptr = regu_var->value.arithptr;
+
+  if (arithptr->rightptr == NULL)
+    {
+      return false;
+    }
+
+  if (type_group == AGG_EXPR_TYPE_GROUP_NUMERIC)
+    {
+      return (regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NUMERIC
+	      && regu_var->domain->precision == DB_DEFAULT_NUMERIC_PRECISION
+	      && regu_var->domain->scale == DB_DEFAULT_NUMERIC_SCALE
+	      && fetch_is_agg_expr_int_source (arithptr->rightptr));
+    }
+
+  if (fetch_agg_expr_type_group (regu_var) != type_group)
+    {
+      return false;
+    }
+  if (fetch_is_agg_expr_int_source (arithptr->rightptr))
+    {
+      return true;
+    }
+  return (type_group == AGG_EXPR_TYPE_GROUP_DOUBLE && arithptr->rightptr->domain != NULL
+	  && (TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_FLOAT
+	      || TP_DOMAIN_TYPE (arithptr->rightptr->domain) == DB_TYPE_NUMERIC));
+}
+
+/*
+ * fetch_is_agg_expr_node () - the recursive half of fetch_is_agg_expr_shape ()
+ *   return: true if this subtree can be fused under the given type_group
+ */
+static bool
+fetch_is_agg_expr_node (const REGU_VARIABLE * regu_var, AGG_EXPR_TYPE_GROUP type_group, int budget)
+{
+  const ARITH_TYPE *arithptr;
+
+  if (budget <= 0)
+    {
+      return false;
+    }
+
+  switch (regu_var->type)
+    {
+    case TYPE_CONSTANT:
+    case TYPE_DBVAL:
+    case TYPE_POSITION:
+    case TYPE_ATTR_ID:
+      return true;
+
+    case TYPE_INARITH:
+      break;
+
+    default:
+      return false;
+    }
+
+  arithptr = regu_var->value.arithptr;
+  if (arithptr == NULL)
+    {
+      return false;
+    }
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      /* a wrap either stands as a leaf or disqualifies the tree; the per-group
+       * rules live in fetch_is_agg_expr_wrap_leaf () */
+      return fetch_is_agg_expr_wrap_leaf (regu_var, type_group);
+    }
+
+  if (type_group != AGG_EXPR_TYPE_GROUP_NUMERIC && fetch_agg_expr_type_group (regu_var) != type_group)
+    {
+      /* Typed families evaluate every operation in the node's own result domain --
+       * an INT node overflows at int32 exactly like the legacy operator -- so each
+       * interior node has to carry a domain of its own type_group.  A FLOAT interior
+       * node would demand per-operation float rounding; it never appears under a
+       * DOUBLE root, and rejecting it here keeps that assumption checked. */
+      return false;
+    }
+
+  /* common descent: both groups walk the children the same way once the
+   * operands are present and the operator is fusable for this group */
+  if (arithptr->leftptr == NULL || arithptr->rightptr == NULL || !FETCH_IS_AGG_EXPR_OP (arithptr->opcode, type_group))
+    {
+      return false;
+    }
+
+  return (fetch_is_agg_expr_node (arithptr->leftptr, type_group, budget - 1)
+	  && fetch_is_agg_expr_node (arithptr->rightptr, type_group, budget - 1));
+}
+
+/*
+ * fetch_agg_expr_eval () - evaluate a {+,-,x} tree entirely in the word domain
+ *   return: true when the whole tree was fused, false to fall back
+ *   out(out): fused result
+ *
+ * Every operand must be a NUMERIC that fits an agg-expr value, or an integer that type checking
+ * has wrapped for a NUMERIC operator. A bare integer leaf -- one the legacy path would
+ * route through numeric_db_value_* instead of float_numeric_db_value_*, deriving
+ * precision differently -- is not accepted, and such trees fall back rather than risk a
+ * different precision or scale. The wrap is what tells the two cases apart: its presence
+ * is type checking stating that the operation is a NUMERIC one.
+ */
+static bool
+fetch_agg_expr_eval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+		     QFILE_TUPLE tpl, NUMERIC_AGG_EXPR_VAL * out)
+{
+  ARITH_TYPE *arithptr;
+  NUMERIC_AGG_EXPR_VAL left, right;
+
+  if (regu_var->type != TYPE_INARITH)
+    {
+      DB_VALUE *peek_leaf = NULL;
+
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, obj_oid, tpl, &peek_leaf) != NO_ERROR)
+	{
+	  return false;
+	}
+
+      return numeric_agg_expr_from_dbv (peek_leaf, out);
+    }
+
+  arithptr = regu_var->value.arithptr;
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      DB_VALUE *peek_int = NULL;
+
+      /* Read the integer the cast would have widened and load it straight into the
+       * register, leaving the cast node itself unevaluated.  What that skips is the whole
+       * conversion: the general path would dispatch through fetch_peek_arith () and pack
+       * a 17-byte NUMERIC into arithptr->value, once per row, only for the evaluator to
+       * unpack it again.  Here it costs an int64 read and a widening. */
+      if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_int) != NO_ERROR)
+	{
+	  return false;
+	}
+      return numeric_agg_expr_from_int_dbv (peek_int, out);
+    }
+
+  if (!fetch_agg_expr_eval (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_agg_expr_eval (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+    {
+      return false;
+    }
+
+  if (arithptr->opcode == T_MUL)
+    {
+      return numeric_agg_expr_mul (&left, &right, out);
+    }
+
+  return numeric_agg_expr_add (&left, &right, arithptr->opcode == T_SUB, out);
+}
+
+/*
+ * fetch_agg_expr_int_from_dbv () - load an integer-type_group value into an int64 register
+ *   return: true, or false for a NULL or a non-integer (that row falls back)
+ */
+static bool
+fetch_agg_expr_int_from_dbv (const DB_VALUE * dbv, int64_t * out)
+{
+  if (dbv == NULL || DB_IS_NULL (dbv))
+    {
+      return false;
+    }
+
+  switch (DB_VALUE_DOMAIN_TYPE (dbv))
+    {
+    case DB_TYPE_SHORT:
+      *out = (int64_t) db_get_short (dbv);
+      return true;
+    case DB_TYPE_INTEGER:
+      *out = (int64_t) db_get_int (dbv);
+      return true;
+    case DB_TYPE_BIGINT:
+      *out = (int64_t) db_get_bigint (dbv);
+      return true;
+    default:
+      return false;
+    }
+}
+
+/*
+ * fetch_agg_expr_eval_int () - evaluate an integer {+,-,x,/} tree in int64 registers
+ *   return: true when the whole tree was fused, false to fall back
+ *   out(out): the root's value; already verified to fit the root's domain
+ *
+ * Every operation runs in the node's own result domain: the int64 register only
+ * carries it, and the width check after each operation is the same test the
+ * legacy operator turns into an overflow error -- so any row that would error
+ * falls back and gets that error from the legacy path.  Division truncates
+ * toward zero exactly like the legacy operator; a zero divisor and the one
+ * overflowing quotient (INT64_MIN / -1) fall back the same way.
+ */
+static bool
+fetch_agg_expr_eval_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+			 QFILE_TUPLE tpl, int64_t * out)
+{
+  ARITH_TYPE *arithptr;
+  int64_t left, right, result;
+
+  if (regu_var->type != TYPE_INARITH)
+    {
+      DB_VALUE *peek_leaf = NULL;
+
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, obj_oid, tpl, &peek_leaf) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_agg_expr_int_from_dbv (peek_leaf, out);
+    }
+
+  arithptr = regu_var->value.arithptr;
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      DB_VALUE *peek_int = NULL;
+
+      /* the widening the wrap stands for happens in the register load itself */
+      if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_int) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_agg_expr_int_from_dbv (peek_int, out);
+    }
+
+  if (!fetch_agg_expr_eval_int (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_agg_expr_eval_int (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+    {
+      return false;
+    }
+
+  switch (arithptr->opcode)
+    {
+    case T_ADD:
+      if (__builtin_add_overflow (left, right, &result))
+	{
+	  return false;
+	}
+      break;
+    case T_SUB:
+      if (__builtin_sub_overflow (left, right, &result))
+	{
+	  return false;
+	}
+      break;
+    case T_MUL:
+      if (__builtin_mul_overflow (left, right, &result))
+	{
+	  return false;
+	}
+      break;
+    case T_DIV:
+      if (right == 0 || (left == INT64_MIN && right == -1))
+	{
+	  return false;
+	}
+      result = left / right;
+      break;
+    default:
+      return false;
+    }
+
+  /* the node computes in its own width; outgrowing it is what the legacy
+   * operator raises an error for */
+  switch (TP_DOMAIN_TYPE (regu_var->domain))
+    {
+    case DB_TYPE_SHORT:
+      if (result > DB_INT16_MAX || result < DB_INT16_MIN)
+	{
+	  return false;
+	}
+      break;
+    case DB_TYPE_INTEGER:
+      if (result > DB_INT32_MAX || result < DB_INT32_MIN)
+	{
+	  return false;
+	}
+      break;
+    default:
+      break;			/* BIGINT: the checked operation was the width test */
+    }
+
+  *out = result;
+  return true;
+}
+
+/*
+ * fetch_agg_expr_dbl_from_dbv () - load a value into a double register
+ *   return: true, or false for a NULL or an unsupported type (that row falls back)
+ *
+ * An integer or FLOAT leaf widens exactly the way the legacy path widens it --
+ * one C conversion -- whether type checking wrapped it or passes it to the
+ * operator raw.
+ */
+static bool
+fetch_agg_expr_dbl_from_dbv (const DB_VALUE * dbv, double *out)
+{
+  if (dbv == NULL || DB_IS_NULL (dbv))
+    {
+      return false;
+    }
+
+  switch (DB_VALUE_DOMAIN_TYPE (dbv))
+    {
+    case DB_TYPE_DOUBLE:
+      *out = db_get_double (dbv);
+      return true;
+    case DB_TYPE_FLOAT:
+      *out = (double) db_get_float (dbv);
+      return true;
+    case DB_TYPE_SHORT:
+      *out = (double) db_get_short (dbv);
+      return true;
+    case DB_TYPE_INTEGER:
+      *out = (double) db_get_int (dbv);
+      return true;
+    case DB_TYPE_BIGINT:
+      *out = (double) db_get_bigint (dbv);
+      return true;
+    case DB_TYPE_NUMERIC:
+      {
+	double adouble;
+
+	/* the same conversion the legacy cast runs (numeric_db_value_coerce_from_num,
+	 * DB_TYPE_DOUBLE case), so the register holds the identical bits */
+	numeric_coerce_num_to_double (dbv, db_get_numeric_scale (dbv, NULL), &adouble);
+	if (OR_CHECK_DOUBLE_OVERFLOW (adouble))
+	  {
+	    /* the legacy cast raises ER_IT_DATA_OVERFLOW here; fall back so it does */
+	    return false;
+	  }
+	*out = adouble;
+	return true;
+      }
+    default:
+      return false;
+    }
+}
+
+/*
+ * fetch_agg_expr_eval_dbl () - evaluate a DOUBLE {+,-,x,/} tree in double registers
+ *   return: true when the whole tree was fused, false to fall back
+ *   out(out): the root's value; finite
+ *
+ * Each operation is the same IEEE operation the legacy operator runs, in the
+ * same order, so results are bit-identical.  The overflow test after each
+ * operation is the legacy operator's own (OR_CHECK_DOUBLE_OVERFLOW); a row
+ * that trips it falls back and gets the error from the legacy path, and so
+ * does a zero divisor.
+ */
+static bool
+fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+			 QFILE_TUPLE tpl, double *out)
+{
+  ARITH_TYPE *arithptr;
+  double left, right, result;
+
+  if (regu_var->type != TYPE_INARITH)
+    {
+      DB_VALUE *peek_leaf = NULL;
+
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, obj_oid, tpl, &peek_leaf) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_agg_expr_dbl_from_dbv (peek_leaf, out);
+    }
+
+  arithptr = regu_var->value.arithptr;
+
+  if (arithptr->opcode == T_CAST_WRAP)
+    {
+      DB_VALUE *peek_src = NULL;
+
+      if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_src) != NO_ERROR)
+	{
+	  return false;
+	}
+      return fetch_agg_expr_dbl_from_dbv (peek_src, out);
+    }
+
+  if (!fetch_agg_expr_eval_dbl (thread_p, arithptr->leftptr, vd, obj_oid, tpl, &left)
+      || !fetch_agg_expr_eval_dbl (thread_p, arithptr->rightptr, vd, obj_oid, tpl, &right))
+    {
+      return false;
+    }
+
+  switch (arithptr->opcode)
+    {
+    case T_ADD:
+      result = left + right;
+      break;
+    case T_SUB:
+      result = left - right;
+      break;
+    case T_MUL:
+      result = left * right;
+      break;
+    case T_DIV:
+      if (right == 0.0)
+	{
+	  return false;
+	}
+      result = left / right;
+      break;
+    default:
+      return false;
+    }
+
+  if (OR_CHECK_DOUBLE_OVERFLOW (result))
+    {
+      return false;
+    }
+
+  *out = result;
+  return true;
+}
 
 /*
  * fetch_peek_arith () -
@@ -101,6 +690,102 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
     }
 
   assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
+
+  /* POC: an aggregate operand expression is evaluated as one word-domain pass.
+   * The general path materializes a DB_VALUE per operation -- packing the
+   * coefficient and re-deriving precision every time -- where the agg-expr evaluation carries
+   * the running coefficient in 128 bits and packs a single result here.
+   *
+   * This is deliberately limited to expressions feeding an aggregate
+   * (REGU_VARIABLE_AGG_OPERAND, set once per query by
+   * qexec_mark_aggregate_operand_expressions (), which also settles the tree
+   * shape then -- the shape cannot change between rows, so it is not re-checked
+   * here). General binary arithmetic stays
+   * with float_numeric_db_value_* so that each numeric operator keeps a single
+   * owner: numeric_db_value_* for the simple cases, float_numeric_db_value_* for
+   * general arithmetic, and the word accumulator plus this agg-expr evaluation for aggregation.
+   *
+   * The agg-expr evaluation writes its one result where the general path would have written it,
+   * so every consumer is unaffected: the tuple descriptor, the aggregate operand
+   * that references it, and the group's first_tuple, which a spilling hash
+   * aggregation later replays through the sort path.
+   *
+   * A NULL result domain is left to the general path, which returns without
+   * touching the result in that case. */
+  if (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_AGG_OPERAND)
+      && regu_var->domain != NULL && TP_DOMAIN_TYPE (regu_var->domain) != DB_TYPE_NULL)
+    {
+      bool fused = false;
+
+      switch (fetch_agg_expr_type_group (regu_var))
+	{
+	case AGG_EXPR_TYPE_GROUP_NUMERIC:
+	  {
+	    NUMERIC_AGG_EXPR_VAL expr_val;
+
+	    if (fetch_agg_expr_eval (thread_p, regu_var, vd, obj_oid, tpl, &expr_val))
+	      {
+		numeric_agg_expr_to_dbv (&expr_val, arithptr->value);
+		fused = true;
+	      }
+	  }
+	  break;
+
+	case AGG_EXPR_TYPE_GROUP_INT:
+	  {
+	    int64_t int_val;
+
+	    if (fetch_agg_expr_eval_int (thread_p, regu_var, vd, obj_oid, tpl, &int_val))
+	      {
+		/* the evaluator verified the value fits the root's domain */
+		switch (TP_DOMAIN_TYPE (regu_var->domain))
+		  {
+		  case DB_TYPE_SHORT:
+		    db_make_short (arithptr->value, (short) int_val);
+		    break;
+		  case DB_TYPE_INTEGER:
+		    db_make_int (arithptr->value, (int) int_val);
+		    break;
+		  default:
+		    db_make_bigint (arithptr->value, (DB_BIGINT) int_val);
+		    break;
+		  }
+		fused = true;
+	      }
+	  }
+	  break;
+
+	case AGG_EXPR_TYPE_GROUP_DOUBLE:
+	  {
+	    double dbl_val;
+
+	    if (fetch_agg_expr_eval_dbl (thread_p, regu_var, vd, obj_oid, tpl, &dbl_val))
+	      {
+		db_make_double (arithptr->value, dbl_val);
+		fused = true;
+	      }
+	  }
+	  break;
+
+	default:
+	  break;
+	}
+
+      if (fused)
+	{
+	  /* returning early skips the constness decision this function makes at its
+	   * end, and the caller asserts that one of the two flags is set.  Mark it
+	   * NOT_CONST: an aggregate operand reads columns, so its value changes per
+	   * row -- claiming ALL_CONST would make the next call reuse the cached
+	   * arithptr->value instead of re-evaluating. */
+	  REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
+	  assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
+
+	  *peek_dbval = arithptr->value;
+
+	  return NO_ERROR;
+	}
+    }
 
   peek_left = NULL;
   peek_right = NULL;

@@ -41,6 +41,7 @@
 #include "query_aggregate.hpp"
 #include "query_analytic.hpp"
 #include "query_opfunc.h"
+#include "numeric_opfunc.h"
 #include "fetch.h"
 #include "dbtype.h"
 #include "object_primitive.h"
@@ -1207,6 +1208,13 @@ qexec_end_one_iteration (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 	    {
 	      GOTO_EXIT_ON_ERROR;
 	    }
+
+	  if (xasl->proc.buildlist.g_agg_domains_resolved)
+	    {
+	      /* Sharing needs the accumulator domains, so it can only be decided here --
+	       * the same place the parallel worker decides it. */
+	      qdata_link_shared_accumulators (xasl->proc.buildlist.g_agg_list);
+	    }
 	}
 
       /* process tuple */
@@ -1314,6 +1322,14 @@ qexec_end_one_iteration (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 		   &xasl->proc.buildvalue.agg_domains_resolved) != NO_ERROR)
 		{
 		  GOTO_EXIT_ON_ERROR;
+		}
+
+	      if (xasl->proc.buildvalue.agg_domains_resolved)
+		{
+		  /* Sharing needs the accumulator domains, so it can only be decided
+		   * here -- mirrors the BUILDLIST path.  Runs once: the resolved flag
+		   * keeps this block from re-entering. */
+		  qdata_link_shared_accumulators (xasl->proc.buildvalue.agg_list);
 		}
 	    }
 
@@ -4608,6 +4624,13 @@ exit_on_error:
   assert (er_errid () != NO_ERROR);
   gbstate->state = er_errid ();
   goto wrapup;
+}
+
+static int
+qexec_numeric_poc_enabled (void)
+{
+  /* POC gate; resolved once at library load, see numeric_init_poc_gate () */
+  return numeric_poc_gate_enabled ();
 }
 
 int
@@ -15077,6 +15100,15 @@ qexec_end_buildvalueblock_iterations (THREAD_ENTRY * thread_p, XASL_NODE * xasl,
   BUILDVALUE_PROC_NODE *buildvalue = &xasl->proc.buildvalue;
 
   /* make final pass on aggregate list nodes */
+  /* A parallel BUILDVALUE resolves the accumulator domains inside the workers, so
+   * the main list was never linked for sharing -- link it here, after the merges
+   * filled the domains and before finalize's propagate reads the links.  On the
+   * serial path this recomputes the same links (idempotent, once per query). */
+  if (buildvalue->agg_list != NULL)
+    {
+      qdata_link_shared_accumulators (buildvalue->agg_list);
+    }
+
   if (buildvalue->agg_list && qdata_finalize_aggregate_list (thread_p, buildvalue->agg_list, false) != NO_ERROR)
     {
       GOTO_EXIT_ON_ERROR;
@@ -15929,6 +15961,16 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	  /* domains not resolved */
 	  xasl->proc.buildlist.g_agg_domains_resolved = 0;
 
+	  /* Flag the output expressions that exist only to feed an aggregate, so
+	   * that the agg-expr evaluation can pick them up. Done here, before any scan
+	   * starts and before parallel workers are spawned, so that the serial
+	   * path and every worker -- which inherits the regu flags -- agree.
+	   *
+	   * Accumulator sharing is NOT linked here: the accumulator domains were
+	   * just reset above, so every aggregate would be rejected.  The linking
+	   * runs after the domains resolve, in qexec_end_one_iteration (). */
+	  qexec_mark_aggregate_operand_expressions (xasl);
+
 	  if (xasl->proc.buildlist.a_eval_list)
 	    {
 	      if (qdata_setup_analytic_eval_list (thread_p, xasl, xasl_state) != NO_ERROR)
@@ -15950,6 +15992,12 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 
 	  /* domains not resolved */
 	  xasl->proc.buildvalue.agg_domains_resolved = 0;
+
+	  /* Flag the operand expressions that exist only to feed an aggregate, so that the
+	   * agg-expr evaluation can pick them up. Done here, before any scan starts and before
+	   * parallel workers are spawned, so that the serial path and every worker -- which
+	   * inherits the regu flags -- agree. */
+	  qexec_mark_aggregate_operand_expressions (xasl);
 	}
 
       multi_upddel = QEXEC_IS_MULTI_TABLE_UPDATE_DELETE (xasl);
@@ -21190,6 +21238,120 @@ qexec_resolve_domains_for_aggregation (THREAD_ENTRY * thread_p, AGGREGATE_TYPE *
 
   /* all ok */
   return NO_ERROR;
+}
+
+/*
+ * qexec_mark_aggregate_operand_expressions () - flag the expressions that only
+ *                                               feed an aggregate
+ *   xasl(in/out): BUILDLIST_PROC or BUILDVALUE_PROC whose operand expressions are marked
+ *
+ * The two proc types reach their operand expression differently.
+ *
+ * A hash aggregation (BUILDLIST) evaluates the expression while building the output
+ * tuple descriptor, and the aggregate node then reads the result through a
+ * TYPE_CONSTANT operand pointing at the very DB_VALUE the expression wrote
+ * (regu->vfetch_to). Matching those two pointers identifies the expressions that
+ * exist solely to feed an aggregate.
+ *
+ * A BUILDVALUE has no such indirection -- the aggregate's operand *is* the expression
+ * regu -- so that one is flagged directly. The serial path does not need the flag
+ * (qdata_evaluate_aggregate_list () already runs the agg-expr evaluation on a TYPE_INARITH operand
+ * before fetching), but a parallel worker does: px_scan_result_handler fetches the
+ * operand itself, and fetch_peek_arith () only reaches the agg-expr evaluation through this flag.
+ *
+ * The flag keeps the agg-expr evaluation -- which belongs to the aggregate path -- from
+ * reaching general expressions: those stay with the float_numeric_db_value_*
+ * operators. Called once per query, right after the aggregate domains resolve.
+ */
+void
+qexec_mark_aggregate_operand_expressions (xasl_node * xasl)
+{
+  REGU_VARIABLE_LIST regu_p;
+  AGGREGATE_TYPE *agg_list, *agg_p;
+  VALPTR_LIST *outptr_list;
+  int budget;
+
+  if (xasl == NULL || !qexec_numeric_poc_enabled ())
+    {
+      /* the gate is settled at load time, so testing it once here keeps it off
+       * the row path entirely */
+      return;
+    }
+
+  budget = prm_get_integer_value (PRM_ID_MAX_RECURSION_SQL_DEPTH);
+
+  if (xasl->type == BUILDVALUE_PROC)
+    {
+      /* Narrower than the BUILDLIST rule below, which flags whatever aggregate an
+       * output expression happens to feed: the agg-expr evaluation rounds differently from the
+       * per-operation operators, and only SUM/AVG has been measured against that. */
+      for (agg_p = xasl->proc.buildvalue.agg_list; agg_p != NULL; agg_p = agg_p->next)
+	{
+	  if (agg_p->function != PT_SUM && agg_p->function != PT_AVG)
+	    {
+	      continue;
+	    }
+	  if (agg_p->option == Q_DISTINCT || agg_p->operands == NULL
+	      || agg_p->operands->value.type != TYPE_INARITH)
+	    {
+	      continue;
+	    }
+
+	  if (fetch_is_agg_expr_shape (&agg_p->operands->value, budget))
+	    {
+	      REGU_VARIABLE_SET_FLAG (&agg_p->operands->value, REGU_VARIABLE_AGG_OPERAND);
+	    }
+	}
+    }
+  else if (xasl->type == BUILDLIST_PROC)
+    {
+      /* Analytic SUM/AVG is deliberately not covered, and the reason is not obvious enough to
+       * leave unwritten -- four attempts at flagging it all measured zero agg-expr calls:
+       *
+       *   func_p->operand          pt_to_analytic_node () always builds it as TYPE_CONSTANT
+       *                            pointing at an a_val_list slot (xasl_generation.c), so it is
+       *                            never an expression
+       *   a_eval_list              same thing, reached from the other side
+       *   a_outptr_list_ex         the output list, not what evaluates the operand
+       *   a_scan_regu_list         where the expression really is by construction -- it fills
+       *                            the slot during the scan, before the sort the analytic needs
+       *                            -- and flagging it still produced no agg-expr call
+       *
+       * A flat query (no derived table) behaves the same, so it is not a matter of the marking
+       * failing to reach an inner XASL either.  Whatever consumes those regu variables does not
+       * route through fetch_peek_arith (), and that is where the next attempt should start
+       * looking.  The accumulator itself works on the analytic path; only this fusion does not. */
+
+      agg_list = xasl->proc.buildlist.g_agg_list;
+      outptr_list = xasl->outptr_list;
+      if (agg_list == NULL || outptr_list == NULL)
+	{
+	  return;
+	}
+
+      for (regu_p = outptr_list->valptrp; regu_p != NULL; regu_p = regu_p->next)
+	{
+	  if (regu_p->value.type != TYPE_INARITH || regu_p->value.vfetch_to == NULL)
+	    {
+	      continue;
+	    }
+
+	  for (agg_p = agg_list; agg_p != NULL; agg_p = agg_p->next)
+	    {
+	      if (agg_p->operands != NULL && agg_p->operands->value.type == TYPE_CONSTANT
+		  && agg_p->operands->value.value.dbvalptr == regu_p->value.vfetch_to)
+		{
+		  /* The tree shape is fixed for the whole query, so settle it here and
+		   * let the row path test one flag instead of walking the tree again. */
+		  if (fetch_is_agg_expr_shape (&regu_p->value, budget))
+		    {
+		      REGU_VARIABLE_SET_FLAG (&regu_p->value, REGU_VARIABLE_AGG_OPERAND);
+		    }
+		  break;
+		}
+	    }
+	}
+    }
 }
 
 /*
