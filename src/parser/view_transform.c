@@ -2249,12 +2249,16 @@ mq_is_pushable_subquery (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * 
     ((statement_spec->next == NULL && (pt_true_search_condition (parser, pred) || is_rownum_only)
       && (subquery->info.query.order_by == NULL || order_by == NULL)) ? true : false);
 
-  /* check if orderby_for set to PT_EXPR_INFO_ROWNUM_ONLY */
+  /* check if every predicate of orderby_for is set to PT_EXPR_INFO_ROWNUM_ONLY */
   orderby_for = subquery->info.query.orderby_for;
-  is_orderby_for = orderby_for && (order_by
-				   || pt_is_distinct (mainquery) || pt_has_aggregate (parser, mainquery)
-				   || (orderby_for->node_type == PT_EXPR
-				       && !PT_EXPR_INFO_IS_FLAGED (orderby_for, PT_EXPR_INFO_ROWNUM_ONLY)));
+  /* the main query numbers its own rows: the subquery's numbering would be read as the main query's */
+  is_orderby_for = orderby_for && (order_by || pt_is_distinct (mainquery) || pt_has_aggregate (parser, mainquery)
+				   || pt_has_inst_in_where_and_select_list (parser, mainquery));
+  for (PT_NODE * pred_node = orderby_for; pred_node != NULL && !is_orderby_for; pred_node = pred_node->next)
+    {
+      is_orderby_for = (pred_node->node_type == PT_EXPR
+			&& !PT_EXPR_INFO_IS_FLAGED (pred_node, PT_EXPR_INFO_ROWNUM_ONLY));
+    }
 
   /* do not rewrite vclass_query as a derived table if spec belongs to an insert statement. */
   if (mainquery->node_type == PT_INSERT)
@@ -2759,7 +2763,8 @@ mq_update_order_by (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * quer
       /* move prev orderby_for to orderby_for */
       if (query_spec->info.query.orderby_for)
 	{
-	  prev_orderby_for = parser_copy_tree (parser, query_spec->info.query.orderby_for);
+	  /* every predicate of the list, not only the first (LIMIT 2, 2 is orderby_num () > 2 and orderby_num () <= 4) */
+	  prev_orderby_for = parser_copy_tree_list (parser, query_spec->info.query.orderby_for);
 	  statement->info.query.orderby_for = parser_append_node (prev_orderby_for, statement->info.query.orderby_for);
 	}
 
@@ -2784,7 +2789,7 @@ mq_update_order_by (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * quer
       /* move orderby_for of subquery to where of mainquery */
       if (query_spec->info.query.orderby_for)
 	{
-	  prev_orderby_for = parser_copy_tree (parser, query_spec->info.query.orderby_for);
+	  prev_orderby_for = parser_copy_tree_list (parser, query_spec->info.query.orderby_for);
 	  prev_orderby_for = pt_lambda_with_arg (parser, prev_orderby_for, ord_num, ins_num, false, 2, false);
 	  statement->info.query.q.select.where =
 	    parser_append_node (prev_orderby_for, statement->info.query.q.select.where);
