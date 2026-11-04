@@ -423,6 +423,8 @@ static PT_NODE *qo_skip_subquery (PARSER_CONTEXT * parser, PT_NODE * tree, void 
 static int qo_query_serial_level (QO_ENV * env);
 static PT_NODE *qo_check_method_call_parallel_eligibility (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg,
 							   int *continue_walk);
+static QO_PLAN *qo_find_order_scan (QO_PLAN * plan);
+static bool qo_desc_scan_changes_key_limit (QO_PLAN * plan, PT_NODE * tree);
 static bool qo_check_orderby_skip_descending (QO_PLAN * plan);
 static bool qo_check_skip_term (QO_ENV * env, BITSET visited_segs, QO_TERM * term, BITSET * visited_terms,
 				BITSET * cur_visited_terms);
@@ -15499,6 +15501,67 @@ qo_order_by_skip_plans_cmp (QO_PLAN * a, QO_PLAN * b)
 }
 
 /*
+ * qo_find_order_scan () - find the scan whose order the plan keeps
+ *   return: the scan plan or NULL
+ *   plan(in):
+ *
+ * note: this is the scan that qo_set_use_desc scans backward
+ */
+static QO_PLAN *
+qo_find_order_scan (QO_PLAN * plan)
+{
+  while (plan && plan->plan_type != QO_PLANTYPE_SCAN)
+    {
+      switch (plan->plan_type)
+	{
+	case QO_PLANTYPE_FOLLOW:
+	  plan = plan->plan_un.follow.head;
+	  break;
+
+	case QO_PLANTYPE_JOIN:
+	  plan = plan->plan_un.join.outer;
+	  break;
+
+	case QO_PLANTYPE_SORT:
+	  plan = plan->plan_un.sort.subplan;
+	  break;
+
+	default:
+	  plan = NULL;
+	  break;
+	}
+    }
+
+  return plan;
+}
+
+/*
+ * qo_desc_scan_changes_key_limit () - check whether scanning the order scan backward changes the keys
+ *				       that the KEYLIMIT hint selects
+ *   return: true or false
+ *   plan(in):
+ *   tree(in): the statement
+ *
+ * note: KEYLIMIT counts the keys from where the scan starts. For example, KEYLIMIT 3 on keys 1 to 10
+ *       selects 1, 2, 3 in a forward scan and 10, 9, 8 in a backward scan. The backward scan is allowed
+ *       only when the USE_DESC_IDX hint asks for it.
+ */
+static bool
+qo_desc_scan_changes_key_limit (QO_PLAN * plan, PT_NODE * tree)
+{
+  QO_PLAN *scan;
+
+  if (tree->info.query.q.select.hint & PT_HINT_USE_IDX_DESC)
+    {
+      return false;
+    }
+
+  scan = qo_find_order_scan (plan);
+
+  return scan != NULL && scan->plan_un.scan.index != NULL && scan->plan_un.scan.index->head->key_limit != NULL;
+}
+
+/*
  * qo_check_orderby_skip_descending - checks whether an index plan will
  *	    skip order by if its columns changes their direction.
  *   return:  true or false
@@ -15536,6 +15599,11 @@ qo_check_orderby_skip_descending (QO_PLAN * plan)
     }
 
   if (tree->info.query.q.select.hint & PT_HINT_NO_IDX_DESC)
+    {
+      return false;
+    }
+
+  if (qo_desc_scan_changes_key_limit (plan, tree))
     {
       return false;
     }
@@ -15717,6 +15785,11 @@ qo_check_groupby_skip_descending (QO_PLAN * plan, PT_NODE * list)
       return false;
     }
 
+  if (qo_desc_scan_changes_key_limit (plan, tree))
+    {
+      return false;
+    }
+
   group_by = tree->info.query.q.select.group_by;
 
   for (trav = list; trav; trav = trav->next)
@@ -15769,32 +15842,8 @@ qo_plan_compute_iscan_sort_list (QO_PLAN * root, PT_NODE * group_by, bool * is_i
   col = NULL;
   *is_index_w_prefix = false;
 
-  /* find sortable plan */
-  plan = root;
-  while (plan && plan->plan_type != QO_PLANTYPE_SCAN)
-    {
-      switch (plan->plan_type)
-	{
-	case QO_PLANTYPE_FOLLOW:
-	  plan = plan->plan_un.follow.head;
-	  break;
-
-	case QO_PLANTYPE_JOIN:
-	  plan = plan->plan_un.join.outer;
-	  break;
-
-	case QO_PLANTYPE_SORT:
-	  plan = plan->plan_un.sort.subplan;
-	  break;
-
-	default:
-	  plan = NULL;
-	  break;
-	}
-    }
-
-  /* check for plan type */
-  if (plan == NULL || plan->plan_type != QO_PLANTYPE_SCAN)
+  plan = qo_find_order_scan (root);
+  if (plan == NULL)
     {
       goto exit_on_end;		/* nop */
     }
