@@ -21305,6 +21305,12 @@ pt_add_null_filter_for_min_max_opt (PARSER_CONTEXT * parser, PT_NODE * select_no
       return;
     }
 
+  /* the min/max-only scan reads the boundary key first, not the rows in the order inst_num() numbers them */
+  if (pt_has_inst_num (parser, select_node->info.query.q.select.where))
+    {
+      return;
+    }
+
   if (!pt_is_single_tuple (parser, select_node))
     {
       return;
