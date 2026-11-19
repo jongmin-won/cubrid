@@ -697,7 +697,7 @@ eb_cell_fixed (const EB_COL * col, const EB_LOC * loc, const HEAP_REC_LAYOUT * l
 }
 
 /* numeric_agg_expr_from_disk () for a coefficient of at most 8 bytes, here: the same fields read the same way --
- * the value's size and sign in byte 0, the scale's sign in byte 1, the scale in byte 2, then the magnitude's bytes,
+ * the size from the precision, the signs and the scale through numeric_disk_* (), then the magnitude's bytes,
  * big-endian, into the coefficient (zero takes no sign) -- with the magnitude in one 64-bit word instead of the
  * 128-bit shifts; a wider value, or a header the bytes do not hold, goes to the call, which decides as it always
  * did.  The two read the same value for every input. */
@@ -711,7 +711,7 @@ eb_num_from_disk (const unsigned char *disk, int avail, NUMERIC_AGG_EXPR_VAL * n
     {
       return numeric_agg_expr_from_disk (disk, avail, num);
     }
-  size = disk[0] & 0x7F;
+  size = numeric_disk_size (disk);
   nbytes = size - NUMERIC_HEADER_SIZE;
   if (nbytes < 0 || nbytes > (int) sizeof (c) || size > avail)
     {
@@ -722,8 +722,8 @@ eb_num_from_disk (const unsigned char *disk, int avail, NUMERIC_AGG_EXPR_VAL * n
       c = (c << 8) | disk[NUMERIC_HEADER_SIZE + i];
     }
   num->coefficient = c;
-  num->scale = (disk[1] & NUMERIC_HEADER_SCALE_SIGN_BIT_MASK) ? -((int) disk[2]) : (int) disk[2];
-  num->is_negative = (c != 0 && (disk[0] & NUMERIC_VALUE_SIGN_BIT_MASK) != 0);
+  num->scale = numeric_disk_scale (disk);
+  num->is_negative = (c != 0 && numeric_disk_is_negative (disk));
   return true;
 }
 
@@ -765,12 +765,12 @@ eb_cell_num_signed (const EB_COL * col, const EB_LOC * loc, const HEAP_REC_LAYOU
     }
   if (avail >= NUMERIC_HEADER_SIZE)
     {
-      const int size = disk[0] & 0x7F;
+      const int size = numeric_disk_size (disk);
       const int nbytes = size - NUMERIC_HEADER_SIZE;
 
       if (nbytes >= 0 && nbytes <= (int) sizeof (uint64_t) && size <= avail)
 	{
-	  const int scale = (disk[1] & NUMERIC_HEADER_SCALE_SIGN_BIT_MASK) ? -((int) disk[2]) : (int) disk[2];
+	  const int scale = numeric_disk_scale (disk);
 	  uint64_t c = 0;
 	  int i;
 
@@ -782,7 +782,7 @@ eb_cell_num_signed (const EB_COL * col, const EB_LOC * loc, const HEAP_REC_LAYOU
 	    {
 	      c = (c << 8) | disk[NUMERIC_HEADER_SIZE + i];
 	    }
-	  *v = (c != 0 && (disk[0] & NUMERIC_VALUE_SIGN_BIT_MASK) != 0) ? -(__int128) c : (__int128) c;
+	  *v = (c != 0 && numeric_disk_is_negative (disk)) ? -(__int128) c : (__int128) c;
 	  return 1;
 	}
     }
@@ -5649,7 +5649,7 @@ eb_pack_dbv (const EXPR_BATCH_PLAN * plan, const EB_VEC * vec, int r, DB_VALUE *
 		c >>= 8;
 	      }
 	    db_make_numeric (out, buf, precision & ~EB_PREC_FLOAT, scale, DB_NUMERIC_BUF_SIZE, num->is_negative,
-			     is_float, 0);
+			     is_float ? DB_NUMERIC_FLOAT_DIGITS : numeric_get_precision_digits (buf));
 	  }
 	else
 	  {

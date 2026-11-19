@@ -7849,7 +7849,7 @@ btree_get_stats_prefix_value_hash (const DB_VALUE * value)
 		double d_value, d_coefficient;
 
 		db_make_numeric (&coefficient, calc_buf, DB_MAX_NUMERIC_PRECISION, 0, DB_NUMERIC_BUF_SIZE, false,
-				 false, 0);
+				 numeric_get_precision_digits ((uint8_t *) calc_buf));
 		numeric_coerce_num_to_double (value, 0, &d_value);
 		numeric_coerce_num_to_double (&coefficient, 0, &d_coefficient);
 		left_scale = scale - (int) lround (log10 (fabs (d_value) / d_coefficient));

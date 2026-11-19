@@ -13783,7 +13783,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	      }
 
 	    db_make_numeric (result, db_get_numeric (arg1), precision, scale, DB_NUMERIC_BUF_SIZE, is_value_negative,
-			     is_float_numeric, arg1->data.num.header.precision);
+			     is_float_numeric ? DB_NUMERIC_FLOAT_DIGITS : numeric_db_value_digits (arg1));
 	  }
 	  break;
 

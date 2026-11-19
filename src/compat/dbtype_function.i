@@ -97,8 +97,8 @@ STATIC_INLINE int db_make_method_error (DB_VALUE * value, const int errcode, con
 STATIC_INLINE int db_make_short (DB_VALUE * value, const DB_C_SHORT num) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_bigint (DB_VALUE * value, const DB_BIGINT num) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale,
-				   const int byte_size, const bool is_value_negative, const bool is_float_numeric,
-				   const int digits) __attribute__ ((ALWAYS_INLINE));
+				   const int byte_size, const bool is_value_negative, const int digits)
+  __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_bit (DB_VALUE * value, const int bit_length, DB_CONST_C_BIT bit_str,
 			       const int bit_str_bit_size) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_varbit (DB_VALUE * value, const int max_bit_length, DB_CONST_C_BIT bit_str,
@@ -1626,12 +1626,13 @@ db_make_bigint (DB_VALUE * value, const DB_BIGINT num)
  * precision(in):
  * scale(in):
  * byte_size(in):
- * is_float_numeric(in):
- * digits(in): POC: digit count of a fixed value for its header, 0 when it is not known
+ * is_value_negative(in):
+ * digits(in): DB_NUMERIC_FLOAT_DIGITS for a float value, whose precision is its digits.
+ *             The digit count (1 or more) of a fixed value, whose precision and scale are its declared type.
  */
 int
 db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale, const int byte_size,
-		 const bool is_value_negative, const bool is_float_numeric, const int digits)
+		 const bool is_value_negative, const int digits)
 {
   int error = NO_ERROR;
 
@@ -1649,7 +1650,7 @@ db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, 
     {
       value->domain.general_info.is_null = 0;
       value->domain.numeric_info.is_value_negative = is_value_negative;
-      if (is_float_numeric)
+      if (digits == DB_NUMERIC_FLOAT_DIGITS)
 	{
 	  value->data.num.header.precision = precision;
 	  value->data.num.header.scale = scale;
@@ -1659,6 +1660,7 @@ db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, 
       else
 	{
 	  /* POC: a fixed value carries its digits in the header */
+	  assert (digits > 0);
 	  value->data.num.header.precision = digits;
 	  value->data.num.header.scale = scale;
 	}

@@ -952,6 +952,12 @@ db_value_domain_zero (DB_VALUE * value, const DB_TYPE type, const int precision,
 	  value->data.num.header.precision = 1;
 	  value->data.num.header.scale = 0;
 	}
+      else
+	{
+	  /* POC: zero has one digit */
+	  value->data.num.header.precision = 1;
+	  value->data.num.header.scale = value->domain.numeric_info.scale;
+	}
       value->domain.numeric_info.is_value_negative = false;
       value->domain.general_info.is_null = 0;
       break;
@@ -1865,7 +1871,7 @@ coerce_char_to_dbvalue (DB_VALUE * value, char *buf, const int buflen)
 	  {
 	    db_make_numeric (value, db_locate_numeric (&tmp_value), DB_VALUE_NUMERIC_HEADER_PRECISION (&tmp_value),
 			     DB_VALUE_NUMERIC_HEADER_SCALE (&tmp_value), DB_NUMERIC_BUF_SIZE,
-			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (&tmp_value), true, 0);
+			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (&tmp_value), DB_NUMERIC_FLOAT_DIGITS);
 	  }
 	else
 	  {
@@ -1884,7 +1890,7 @@ coerce_char_to_dbvalue (DB_VALUE * value, char *buf, const int buflen)
 	      {
 		/* Yes, I know that the precision and scale are already set, but this is neater than just assigning the
 		 * value. */
-		db_make_numeric (value, new_num, precision, scale, DB_NUMERIC_BUF_SIZE, tmp_value_is_negative, false,
+		db_make_numeric (value, new_num, precision, scale, DB_NUMERIC_BUF_SIZE, tmp_value_is_negative,
 				 new_digits);
 	      }
 	  }
