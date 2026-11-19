@@ -97,8 +97,8 @@ STATIC_INLINE int db_make_method_error (DB_VALUE * value, const int errcode, con
 STATIC_INLINE int db_make_short (DB_VALUE * value, const DB_C_SHORT num) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_bigint (DB_VALUE * value, const DB_BIGINT num) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale,
-				   const int byte_size, const bool is_value_negative, const bool is_float_numeric)
-  __attribute__ ((ALWAYS_INLINE));
+				   const int byte_size, const bool is_value_negative, const bool is_float_numeric,
+				   const int digits) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_bit (DB_VALUE * value, const int bit_length, DB_CONST_C_BIT bit_str,
 			       const int bit_str_bit_size) __attribute__ ((ALWAYS_INLINE));
 STATIC_INLINE int db_make_varbit (DB_VALUE * value, const int max_bit_length, DB_CONST_C_BIT bit_str,
@@ -1627,10 +1627,11 @@ db_make_bigint (DB_VALUE * value, const DB_BIGINT num)
  * scale(in):
  * byte_size(in):
  * is_float_numeric(in):
+ * digits(in): POC: digit count of a fixed value for its header, 0 when it is not known
  */
 int
 db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale, const int byte_size,
-		 const bool is_value_negative, const bool is_float_numeric)
+		 const bool is_value_negative, const bool is_float_numeric, const int digits)
 {
   int error = NO_ERROR;
 
@@ -1654,6 +1655,12 @@ db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, 
 	  value->data.num.header.scale = scale;
 	  value->domain.numeric_info.precision = DB_DEFAULT_NUMERIC_PRECISION;
 	  value->domain.numeric_info.scale = DB_DEFAULT_NUMERIC_SCALE;
+	}
+      else
+	{
+	  /* POC: a fixed value carries its digits in the header */
+	  value->data.num.header.precision = digits;
+	  value->data.num.header.scale = scale;
 	}
 
       if (!numeric_repr_read_disk (value->data.num.d.buf, num, byte_size))

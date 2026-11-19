@@ -8396,6 +8396,12 @@ mr_setmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value)
 
 	  assert ((byte_size & NUMERIC_VALUE_SIGN_BIT_MASK) == 0);
 
+	  /* POC: a fixed value stores its digits, not the declared precision */
+	  if (!is_float_numeric)
+	    {
+	      precision = numeric_db_value_digits (value);
+	    }
+
 	  header[0] = byte_size | (is_value_negative ? NUMERIC_VALUE_SIGN_BIT_MASK : 0x00);
 	  if (scale < 0)
 	    {
@@ -8473,7 +8479,16 @@ mr_getmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy
 
       num = (DB_C_NUMERIC) ((char *) cur + NUMERIC_HEADER_SIZE);
 
-      error = db_make_numeric (value, num, precision, scale, byte_size, is_value_negative, is_float_numeric);
+      if (is_float_numeric)
+	{
+	  error = db_make_numeric (value, num, precision, scale, byte_size, is_value_negative, true, 0);
+	}
+      else
+	{
+	  /* POC: the declared type comes from the domain, the digits from the header */
+	  error =
+	    db_make_numeric (value, num, domain->precision, scale, byte_size, is_value_negative, false, precision);
+	}
       value->need_clear = false;
     }
 
@@ -8650,9 +8665,11 @@ mr_setval_numeric (DB_VALUE * dest, const DB_VALUE * src, bool copy)
 	   * difference between the copy and non-copy operations, this may
 	   * need to change.
 	   */
+	  /* POC: a fixed copy keeps the digits of its source */
 	  error =
 	    db_make_numeric (dest, src_numeric, precision, scale, DB_NUMERIC_BUF_SIZE,
-			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (src), is_float_numeric);
+			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (src), is_float_numeric,
+			     src->data.num.header.precision);
 	}
     }
   return error;
@@ -8725,6 +8742,12 @@ mr_data_writeval_numeric (OR_BUF * buf, DB_VALUE * value)
 	      disk_size = numeric_repr_disk_size_by_value (numeric);
 	    }
 	  assert ((disk_size & NUMERIC_VALUE_SIGN_BIT_MASK) == 0);
+
+	  /* POC: a fixed value stores its digits, not the declared precision */
+	  if (!is_float_numeric)
+	    {
+	      precision = numeric_db_value_digits (value);
+	    }
 
 	  header[0] = disk_size | (DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (value) ? NUMERIC_VALUE_SIGN_BIT_MASK : 0x00);
 	  if (scale < 0)
@@ -8824,7 +8847,15 @@ mr_data_readval_numeric (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int
 
       num = (DB_C_NUMERIC) (buf->ptr + NUMERIC_HEADER_SIZE);
 
-      rc = db_make_numeric (value, num, precision, scale, size, is_value_negative, is_float_numeric);
+      if (is_float_numeric)
+	{
+	  rc = db_make_numeric (value, num, precision, scale, size, is_value_negative, true, 0);
+	}
+      else
+	{
+	  /* POC: the declared type comes from the domain, the digits from the header */
+	  rc = db_make_numeric (value, num, domain->precision, scale, size, is_value_negative, false, precision);
+	}
 
       value->need_clear = false;
       or_advance (buf, size);

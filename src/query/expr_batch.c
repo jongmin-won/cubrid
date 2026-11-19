@@ -5649,7 +5649,7 @@ eb_pack_dbv (const EXPR_BATCH_PLAN * plan, const EB_VEC * vec, int r, DB_VALUE *
 		c >>= 8;
 	      }
 	    db_make_numeric (out, buf, precision & ~EB_PREC_FLOAT, scale, DB_NUMERIC_BUF_SIZE, num->is_negative,
-			     is_float);
+			     is_float, 0);
 	  }
 	else
 	  {

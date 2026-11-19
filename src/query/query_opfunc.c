@@ -5080,7 +5080,7 @@ qdata_unary_minus_dbval (DB_VALUE * result_p, DB_VALUE * dbval_p)
 	  }
 
 	db_make_numeric (result_p, db_get_numeric (dbval_p), precision, scale, DB_NUMERIC_BUF_SIZE, is_value_negative,
-			 is_float_numeric);
+			 is_float_numeric, dbval_p->data.num.header.precision);
       }
       break;
 

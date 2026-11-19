@@ -123,9 +123,13 @@ typedef enum
 #define NUMERIC_VALUE_SIGN_BIT_MASK 0x80
 #define NUMERIC_HEADER_SCALE_SIGN_BIT_MASK 0x80
 
+/* POC: a fixed value keeps the digits of its header, and takes the declared precision when it has none */
 #define FIXED_TO_FLOAT_NUMERIC(value) \
   do { \
-    (value)->data.num.header.precision = (value)->domain.numeric_info.precision; \
+    if ((value)->data.num.header.precision <= 0) \
+      { \
+        (value)->data.num.header.precision = (value)->domain.numeric_info.precision; \
+      } \
     (value)->data.num.header.scale = (value)->domain.numeric_info.scale; \
     (value)->domain.numeric_info.precision = DB_DEFAULT_NUMERIC_PRECISION; \
     (value)->domain.numeric_info.scale = 0; \
@@ -167,7 +171,8 @@ extern int numeric_internal_float_to_num (float afloat, int dst_scale, DB_C_NUME
 extern int numeric_coerce_string_to_num (const char *astring, int astring_len, INTL_CODESET codeset, DB_VALUE * num);
 
 extern int numeric_coerce_num_to_num (const DB_VALUE * src_value, int src_prec, int src_scale, int dest_prec,
-				      int dest_scale, DB_C_NUMERIC dest_num, bool * dest_num_is_negative);
+				      int dest_scale, DB_C_NUMERIC dest_num, bool * dest_num_is_negative,
+				      int *dest_digits);
 
 #if defined (__cplusplus)
 /* Fixed-type operations shared by the legacy dispatchers and the converters. */
@@ -200,6 +205,7 @@ extern char *numeric_db_value_print (const DB_VALUE * val, char *buf);
 /* Floating-Point NUMERIC */
 extern int numeric_get_precision_digits (uint8_t * calc_buf);
 extern void numeric_db_value_fixed_to_float_domain (DB_VALUE * value, const DB_DOMAIN * domain);
+extern int numeric_db_value_digits (const DB_VALUE * value);
 extern int float_numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * answer);
 extern int float_numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * answer);
 extern int float_numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * answer);
