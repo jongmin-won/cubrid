@@ -8485,11 +8485,9 @@ mr_getmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy
 	}
       else
 	{
-	  /* POC: the declared type comes from the domain, the digits from the header. A value read with the domain of
-	   * another column, as a foreign key message does, keeps its own scale and takes its digits as its precision */
-	  error =
-	    db_make_numeric (value, num, (scale == domain->scale) ? domain->precision : precision, scale, byte_size,
-			     is_value_negative, precision);
+	  /* POC: the declared type comes from the domain, the digits from the header */
+	  assert (precision <= domain->precision && scale == domain->scale);
+	  error = db_make_numeric (value, num, domain->precision, scale, byte_size, is_value_negative, precision);
 	}
       value->need_clear = false;
     }
@@ -8812,9 +8810,22 @@ mr_data_readval_numeric (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int
 	  rc = or_advance (buf, size);
 	}
     }
-  else if (size == 0 || (domain->type->id == DB_TYPE_NUMERIC && domain->precision == 0))
+  else if (size == 0)
     {
-      /* its NULL */
+      /* its NULL. Make the value NULL as the other types do, or a value reused for each row keeps the last one. A
+       * variable domain has no precision, so it takes the default one */
+      if (domain->type->id == DB_TYPE_NUMERIC && domain->precision > 0)
+	{
+	  rc = db_value_domain_init (value, DB_TYPE_NUMERIC, domain->precision, domain->scale);
+	}
+      else
+	{
+	  rc = db_value_domain_init (value, DB_TYPE_NUMERIC, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE);
+	}
+    }
+  else if (domain->type->id == DB_TYPE_NUMERIC && domain->precision == 0)
+    {
+      /* numeric(0,0) of an old view or CAST reads as NULL */
       rc = or_advance (buf, 0);
     }
   else
@@ -8855,11 +8866,9 @@ mr_data_readval_numeric (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int
 	}
       else
 	{
-	  /* POC: the declared type comes from the domain, the digits from the header. A value read with the domain of
-	   * another column, as a foreign key message does, keeps its own scale and takes its digits as its precision */
-	  rc =
-	    db_make_numeric (value, num, (scale == domain->scale) ? domain->precision : precision, scale, size,
-			     is_value_negative, precision);
+	  /* POC: the declared type comes from the domain, the digits from the header */
+	  assert (precision <= domain->precision && scale == domain->scale);
+	  rc = db_make_numeric (value, num, domain->precision, scale, size, is_value_negative, precision);
 	}
 
       value->need_clear = false;

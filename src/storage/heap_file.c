@@ -19434,8 +19434,8 @@ heap_object_upgrade_domain (THREAD_ENTRY * thread_p, HEAP_SCANCACHE * upd_scanca
 
 	      if (dest_prec == DB_DEFAULT_NUMERIC_PRECISION)
 		{
-		  /* this handles both ATT_CHG_TYPE_NUMERIC_PREC_INCR and SM_ATTR_CHG_WITH_ROW_UPDATE cases.
-		   * For float numeric, precision must be calculated accurately from the actual value.
+		  /* POC: a fixed to float ALTER keeps its rows and does not come here. A rewrite that ends in a float
+		   * NUMERIC takes the digits of the value as its precision
 		   */
 		  value->dbvalue.data.num.header.precision =
 		    numeric_get_precision_digits (value->dbvalue.data.num.d.buf);
@@ -19444,8 +19444,8 @@ heap_object_upgrade_domain (THREAD_ENTRY * thread_p, HEAP_SCANCACHE * upd_scanca
 		}
 	      else if (src_scale == dest_scale && src_prec < dest_prec)
 		{
-		  /* optimize ATT_CHG_TYPE_NUMERIC_PREC_INCR case: when numeric precision increases
-		   * with same scale, only update domain metadata (no value cast needed).
+		  /* POC: an ALTER that only raises the precision keeps its rows and does not come here. A rewrite that
+		   * does the same needs no cast, only the domain changes
 		   */
 		  can_skip_cast = true;
 		}

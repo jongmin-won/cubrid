@@ -2622,6 +2622,9 @@ numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       db_make_null (answer);
       return ER_OBJ_INVALID_ARGUMENTS;
     }
+  /* POC: serial only, whose values are all fixed, so the result is fixed too */
+  assert (DB_VALUE_PRECISION (dbv1) != DB_DEFAULT_NUMERIC_PRECISION
+	  && DB_VALUE_PRECISION (dbv2) != DB_DEFAULT_NUMERIC_PRECISION);
 
   /* Check for NULL values */
   if (DB_IS_NULL (dbv1) || DB_IS_NULL (dbv2))
@@ -2895,6 +2898,9 @@ numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       db_make_null (answer);
       return ER_OBJ_INVALID_ARGUMENTS;
     }
+  /* POC: serial only, whose values are all fixed, so the result is fixed too */
+  assert (DB_VALUE_PRECISION (dbv1) != DB_DEFAULT_NUMERIC_PRECISION
+	  && DB_VALUE_PRECISION (dbv2) != DB_DEFAULT_NUMERIC_PRECISION);
 
   /* Check for NULL values */
   if (DB_IS_NULL (dbv1) || DB_IS_NULL (dbv2))
@@ -3169,6 +3175,9 @@ numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       db_make_null (answer);
       return ER_OBJ_INVALID_ARGUMENTS;
     }
+  /* POC: serial only, whose values are all fixed, so the result is fixed too */
+  assert (DB_VALUE_PRECISION (dbv1) != DB_DEFAULT_NUMERIC_PRECISION
+	  && DB_VALUE_PRECISION (dbv2) != DB_DEFAULT_NUMERIC_PRECISION);
 
   /* Check for NULL values */
   if (DB_IS_NULL (dbv1) || DB_IS_NULL (dbv2))
@@ -7870,6 +7879,12 @@ numeric_db_value_digits (const DB_VALUE * value)
 {
   if (value->data.num.header.precision > 0)
     {
+#if !defined (NDEBUG)
+      /* POC: the header digits of a fixed value are the digits of its coefficient, zero has one */
+      const int coefficient_digits = numeric_get_precision_digits ((uint8_t *) db_locate_numeric (value));
+      assert (value->domain.numeric_info.precision == DB_DEFAULT_NUMERIC_PRECISION
+	      || value->data.num.header.precision == (coefficient_digits > 0 ? coefficient_digits : 1));
+#endif
       return value->data.num.header.precision;
     }
   return numeric_get_precision_digits ((uint8_t *) db_locate_numeric (value));

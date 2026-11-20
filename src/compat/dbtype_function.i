@@ -1671,6 +1671,15 @@ db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, 
 	  assert_release_error (false);
 	  error = ER_FAILED;
 	}
+#if !defined (NDEBUG) && defined (__cplusplus)
+      else if (digits != DB_NUMERIC_FLOAT_DIGITS)
+	{
+	  /* POC: the digits given for a fixed value are the digits of its coefficient, zero has one. The C build of
+	   * this file cannot call the counter, which is C++ */
+	  const int coefficient_digits = numeric_get_precision_digits ((uint8_t *) value->data.num.d.buf);
+	  assert (digits == (coefficient_digits > 0 ? coefficient_digits : 1));
+	}
+#endif
     }
   else
     {

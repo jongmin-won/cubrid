@@ -123,13 +123,10 @@ typedef enum
 #define NUMERIC_VALUE_SIGN_BIT_MASK 0x80
 #define NUMERIC_HEADER_SCALE_SIGN_BIT_MASK 0x80
 
-/* POC: a fixed value keeps the digits of its header, and takes the declared precision when it has none */
+/* POC: a fixed value keeps the digits of its header, and counts them when it has none */
 #define FIXED_TO_FLOAT_NUMERIC(value) \
   do { \
-    if ((value)->data.num.header.precision <= 0) \
-      { \
-        (value)->data.num.header.precision = (value)->domain.numeric_info.precision; \
-      } \
+    (value)->data.num.header.precision = numeric_db_value_digits (value); \
     (value)->data.num.header.scale = (value)->domain.numeric_info.scale; \
     (value)->domain.numeric_info.precision = DB_DEFAULT_NUMERIC_PRECISION; \
     (value)->domain.numeric_info.scale = 0; \

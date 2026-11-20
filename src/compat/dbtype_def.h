@@ -1346,6 +1346,11 @@ extern "C"
 
 #ifdef __cplusplus
 }
+
+/* POC: the last argument of db_make_numeric () is the digits of a fixed value, so a caller that still passes
+ * whether the value is float fails to compile instead of making the other kind of value */
+int db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale,
+		     const int byte_size, const bool is_value_negative, const bool digits) = delete;
 #endif				/* __cplusplus */
 
 #endif				/* _DBTYPE_DEF_H_ */
