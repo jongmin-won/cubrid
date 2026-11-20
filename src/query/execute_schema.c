@@ -340,6 +340,9 @@ static int do_run_upgrade_instances_domain (PARSER_CONTEXT * parser, OID * p_cla
 static int do_check_rows_fit_in_hierarchy (PARSER_CONTEXT * parser, MOP class_mop, int att_id);
 
 static int do_drop_att_constraints (MOP class_mop, SM_CONSTRAINT_INFO * constr_info_list);
+static int do_change_index_key_type (MOP class_mop, const char *index_name, bool * is_changed);
+static int do_change_att_index_key_types (MOP class_mop, const OID * partition_oids, int partition_count,
+					  SM_CONSTRAINT_INFO ** constr_info_list);
 
 static int do_recreate_att_constraints (MOP class_mop, SM_CONSTRAINT_INFO * constr_info_list);
 
@@ -10906,6 +10909,7 @@ do_alter_clause_change_attribute (PARSER_CONTEXT * const parser, PT_NODE * const
   int user_count = 0;
   int i;
   bool has_partitions = false;
+  bool has_subclasses = false;
   bool is_srv_update_needed = false;
   OID class_oid;
   int att_id = -1;
@@ -11004,6 +11008,10 @@ do_alter_clause_change_attribute (PARSER_CONTEXT * const parser, PT_NODE * const
 	    }
 	}
       has_partitions = true;
+    }
+  else if (ctemplate->current->users != NULL)
+    {
+      has_subclasses = true;
     }
 
   error = tran_system_savepoint (UNIQUE_SAVEPOINT_CHANGE_ATTR);
@@ -11149,6 +11157,17 @@ do_alter_clause_change_attribute (PARSER_CONTEXT * const parser, PT_NODE * const
 
   if (is_srv_update_needed || is_att_prop_set (attr_chg_prop.p[P_TYPE], ATT_CHG_TYPE_PREC_INCR))
     {
+      if (!is_srv_update_needed && !has_subclasses)
+	{
+	  /* the rows keep their values, so an index whose keys can be read with the new domain is kept */
+	  error = do_change_att_index_key_types (class_mop, has_partitions ? usr_oid_array : NULL, user_count,
+						 &attr_chg_prop.constr_info);
+	  if (error != NO_ERROR)
+	    {
+	      goto exit;
+	    }
+	}
+
       error = do_drop_att_constraints (class_mop, attr_chg_prop.constr_info);
       if (error != NO_ERROR)
 	{
@@ -15161,6 +15180,122 @@ do_drop_att_constraints (MOP class_mop, SM_CONSTRAINT_INFO * constr_info_list)
 	}
     }
 error_exit:
+  return error;
+}
+
+/*
+ * do_change_index_key_type() - changes the key domain in the B-tree root header of an index to the current domain of
+ *				its columns
+ *  return: Error code
+ *  class_mop(in): class object
+ *  index_name(in): name of the index
+ *  is_changed(out): false if the index has to be rebuilt
+ */
+static int
+do_change_index_key_type (MOP class_mop, const char *index_name, bool * is_changed)
+{
+  SM_CLASS *class_ = NULL;
+  SM_CLASS_CONSTRAINT *con = NULL;
+  TP_DOMAIN *key_type = NULL;
+  int error = NO_ERROR;
+
+  *is_changed = false;
+
+  error = au_fetch_class_force (class_mop, &class_, AU_FETCH_READ);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  con = classobj_find_class_index (class_, index_name);
+  if (con == NULL || BTID_IS_NULL (&con->index_btid))
+    {
+      return NO_ERROR;
+    }
+
+  key_type = sm_constraint_key_domain (con);
+  if (key_type == NULL)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  return btree_change_key_type (&con->index_btid, key_type, is_changed);
+}
+
+/*
+ * do_change_att_index_key_types() - keeps the indexes of a column whose precision only grew by changing their key
+ *				      domain, and leaves in the list the ones that have to be rebuilt
+ *  return: Error code
+ *  class_mop(in): class object
+ *  partition_oids(in): partitions of the class, NULL if it has none
+ *  partition_count(in): number of partitions
+ *  constr_info_list(in/out): constraints of the column
+ */
+static int
+do_change_att_index_key_types (MOP class_mop, const OID * partition_oids, int partition_count,
+			       SM_CONSTRAINT_INFO ** constr_info_list)
+{
+  SM_CONSTRAINT_INFO **link = constr_info_list;
+  bool has_changed = false;
+  int i;
+  int error = NO_ERROR;
+
+  while (*link != NULL)
+    {
+      SM_CONSTRAINT_INFO *constr = *link;
+      bool is_changed = false;
+
+      /* the key of a function or filter index is not just its columns */
+      if ((constr->constraint_type == DB_CONSTRAINT_INDEX || constr->constraint_type == DB_CONSTRAINT_REVERSE_INDEX
+	   || constr->constraint_type == DB_CONSTRAINT_UNIQUE || constr->constraint_type == DB_CONSTRAINT_REVERSE_UNIQUE
+	   || constr->constraint_type == DB_CONSTRAINT_PRIMARY_KEY)
+	  && constr->func_index_info == NULL && constr->filter_predicate == NULL
+	  && (constr->index_status == SM_NORMAL_INDEX || constr->index_status == SM_INVISIBLE_INDEX))
+	{
+	  error = do_change_index_key_type (class_mop, constr->name, &is_changed);
+	  for (i = 0; error == NO_ERROR && is_changed && partition_oids != NULL && i < partition_count; i++)
+	    {
+	      MOP partition_mop = ws_mop (&partition_oids[i], NULL);
+
+	      if (partition_mop == NULL)
+		{
+		  ASSERT_ERROR_AND_SET (error);
+		  break;
+		}
+	      error = do_change_index_key_type (partition_mop, constr->name, &is_changed);
+	    }
+	  if (error != NO_ERROR)
+	    {
+	      return error;
+	    }
+	}
+
+      if (is_changed)
+	{
+	  *link = constr->next;
+	  constr->next = NULL;
+	  sm_free_constraint_info (&constr);
+	  has_changed = true;
+	}
+      else
+	{
+	  link = &constr->next;
+	}
+    }
+
+  if (!has_changed)
+    {
+      return NO_ERROR;
+    }
+
+  /* the cached index statistics carry the key domain read before the change */
+  error = sm_update_statistics_without_gathering_stats (class_mop, STATS_WITH_SAMPLING);
+  for (i = 0; error == NO_ERROR && partition_oids != NULL && i < partition_count; i++)
+    {
+      error = sm_update_statistics_without_gathering_stats (ws_mop (&partition_oids[i], NULL), STATS_WITH_SAMPLING);
+    }
+
   return error;
 }
 

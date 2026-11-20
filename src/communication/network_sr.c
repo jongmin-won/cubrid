@@ -434,6 +434,10 @@ net_server_init (void)
   req_p->action_attribute = IN_TRANSACTION;
   req_p->processing_function = sbtree_get_key_type;
 
+  req_p = &net_Requests[NET_SERVER_BTREE_CHANGE_KEY_TYPE];
+  req_p->action_attribute = (CHECK_DB_MODIFICATION | IN_TRANSACTION);
+  req_p->processing_function = sbtree_change_key_type;
+
   req_p = &net_Requests[NET_SERVER_BTREE_COMPACT_OVERFLOW];
   req_p->action_attribute = (CHECK_DB_MODIFICATION | IN_TRANSACTION);
   req_p->processing_function = sbtree_compact_overflow;

@@ -314,7 +314,10 @@
   \
   /* password proof for a client login or user switch, appended likewise */ \
   NET_SERVER_REQUEST_ITEM(NET_SERVER_AU_CHALLENGE) \
-  NET_SERVER_REQUEST_ITEM(NET_SERVER_AU_RESPONSE)
+  NET_SERVER_REQUEST_ITEM(NET_SERVER_AU_RESPONSE) \
+  \
+  /* key domain of an index whose column was widened, appended likewise */ \
+  NET_SERVER_REQUEST_ITEM(NET_SERVER_BTREE_CHANGE_KEY_TYPE)
 
 enum net_server_request
 {

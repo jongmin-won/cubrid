@@ -5264,6 +5264,48 @@ sbtree_compact_overflow (THREAD_ENTRY *thread_p, unsigned int rid, char *request
 }
 
 /*
+ * sbtree_change_key_type () - Change the key domain in the root header of an index whose column was widened
+ *
+ * return :
+ * thread_p (in) :
+ * rid (in) :
+ * request (in) :
+ * reqlen (in) :
+ */
+void
+sbtree_change_key_type (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
+{
+  BTID btid;
+  TP_DOMAIN *key_type = NULL;
+  bool is_changed = false;
+  int error;
+  OR_ALIGNED_BUF (OR_INT_SIZE * 2) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *ptr;
+
+  ptr = or_unpack_btid (request, &btid);
+  ptr = or_unpack_domain (ptr, &key_type, NULL);
+
+  if (key_type == NULL)
+    {
+      ASSERT_ERROR_AND_SET (error);
+    }
+  else
+    {
+      error = xbtree_change_key_type (thread_p, &btid, key_type, &is_changed);
+    }
+  if (error != NO_ERROR)
+    {
+      (void) return_error_to_client (thread_p, rid);
+    }
+
+  ptr = or_pack_int (reply, error);
+  ptr = or_pack_int (ptr, is_changed ? 1 : 0);
+
+  css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
+}
+
+/*
  * sdk_totalpgs -
  *
  * return:
