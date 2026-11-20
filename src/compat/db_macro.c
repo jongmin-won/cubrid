@@ -496,7 +496,6 @@ db_value_domain_min (DB_VALUE * value, const DB_TYPE type,
 	     * this function only needs to consider the maximum integer magnitude case
 	     * by setting the scale to its minimum value.
 	     */
-	    /* POC: the value is float already, so its header takes the digits and the scale */
 	    value->data.num.header.precision = DB_MAX_NUMERIC_PRECISION;
 	    value->data.num.header.scale = DB_MIN_NUMERIC_SCALE;
 	    value->domain.numeric_info.scale = DB_DEFAULT_NUMERIC_SCALE;
@@ -504,7 +503,6 @@ db_value_domain_min (DB_VALUE * value, const DB_TYPE type,
 	else
 	  {
 	    memset (str + 1, '9', value->domain.numeric_info.precision);
-	    /* POC: the coefficient has as many digits as the declared precision */
 	    value->data.num.header.precision = value->domain.numeric_info.precision;
 	    value->data.num.header.scale = value->domain.numeric_info.scale;
 	  }
@@ -687,7 +685,6 @@ db_value_domain_max (DB_VALUE * value, const DB_TYPE type,
 	     * this function only needs to consider the maximum integer magnitude case
 	     * by setting the scale to its minimum value.
 	     */
-	    /* POC: the value is float already, so its header takes the digits and the scale */
 	    value->data.num.header.precision = DB_MAX_NUMERIC_PRECISION;
 	    value->data.num.header.scale = DB_MIN_NUMERIC_SCALE;
 	    value->domain.numeric_info.scale = DB_DEFAULT_NUMERIC_SCALE;
@@ -695,7 +692,6 @@ db_value_domain_max (DB_VALUE * value, const DB_TYPE type,
 	else
 	  {
 	    memset (str, '9', value->domain.numeric_info.precision);
-	    /* POC: the coefficient has as many digits as the declared precision */
 	    value->data.num.header.precision = value->domain.numeric_info.precision;
 	    value->data.num.header.scale = value->domain.numeric_info.scale;
 	  }
@@ -958,7 +954,6 @@ db_value_domain_zero (DB_VALUE * value, const DB_TYPE type, const int precision,
 	}
       else
 	{
-	  /* POC: zero has one digit */
 	  value->data.num.header.precision = 1;
 	  value->data.num.header.scale = value->domain.numeric_info.scale;
 	}

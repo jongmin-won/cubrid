@@ -4291,7 +4291,7 @@ locator_check_foreign_key (THREAD_ENTRY * thread_p, HFID * hfid, OID * class_oid
 	      char *val_print = NULL;
 	      TP_DOMAIN *key_type = NULL;
 
-	      /* POC: the search gave a multi-column key the domain of the parent index, whose NUMERIC precision and
+	      /* the search gave a multi-column key the domain of the parent index, whose NUMERIC precision and
 	       * scale can differ, so print it in the domain of its own index */
 	      if (DB_VALUE_TYPE (key_dbvalue) == DB_TYPE_MIDXKEY
 		  && xbtree_get_key_type (thread_p, btid, &key_type) == NO_ERROR)

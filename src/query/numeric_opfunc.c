@@ -2622,7 +2622,7 @@ numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       db_make_null (answer);
       return ER_OBJ_INVALID_ARGUMENTS;
     }
-  /* POC: serial only, whose values are all fixed, so the result is fixed too */
+  /* only serial calls this, with fixed values, so the result is fixed too */
   assert (DB_VALUE_PRECISION (dbv1) != DB_DEFAULT_NUMERIC_PRECISION
 	  && DB_VALUE_PRECISION (dbv2) != DB_DEFAULT_NUMERIC_PRECISION);
 
@@ -2699,7 +2699,6 @@ numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       /* Prevent -0; zero is always treated as positive. */
       result_sign = false;
     }
-  /* POC: serial only, so the result is fixed: the common precision and scale, and the digits of the result */
   db_make_numeric (answer, temp, prec, DB_VALUE_SCALE (&dbv1_common), DB_NUMERIC_BUF_SIZE, result_sign,
 		   numeric_get_precision_digits (temp));
 
@@ -2898,7 +2897,7 @@ numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       db_make_null (answer);
       return ER_OBJ_INVALID_ARGUMENTS;
     }
-  /* POC: serial only, whose values are all fixed, so the result is fixed too */
+  /* only serial calls this, with fixed values, so the result is fixed too */
   assert (DB_VALUE_PRECISION (dbv1) != DB_DEFAULT_NUMERIC_PRECISION
 	  && DB_VALUE_PRECISION (dbv2) != DB_DEFAULT_NUMERIC_PRECISION);
 
@@ -2975,7 +2974,6 @@ numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       /* Prevent -0; zero is always treated as positive. */
       result_sign = false;
     }
-  /* POC: serial only, so the result is fixed: the common precision and scale, and the digits of the result */
   db_make_numeric (answer, temp, prec, DB_VALUE_SCALE (&dbv1_common), DB_NUMERIC_BUF_SIZE, result_sign,
 		   numeric_get_precision_digits (temp));
 
@@ -3175,7 +3173,7 @@ numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
       db_make_null (answer);
       return ER_OBJ_INVALID_ARGUMENTS;
     }
-  /* POC: serial only, whose values are all fixed, so the result is fixed too */
+  /* only serial calls this, with fixed values, so the result is fixed too */
   assert (DB_VALUE_PRECISION (dbv1) != DB_DEFAULT_NUMERIC_PRECISION
 	  && DB_VALUE_PRECISION (dbv2) != DB_DEFAULT_NUMERIC_PRECISION);
 
@@ -3200,7 +3198,6 @@ numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * a
     }
 
   /* If no error, make the answer */
-  /* POC: serial only, so the result is fixed: the common precision and scale, and the digits of the result */
   db_make_numeric (answer, result, prec, scale, DB_NUMERIC_BUF_SIZE, result_sign,
 		   numeric_get_precision_digits (result));
 
@@ -6389,7 +6386,7 @@ numeric_coerce_num_to_num (const DB_VALUE * src_value, int src_prec, int src_sca
       return NO_ERROR;
     }
 
-  /* 2. POC: the digits of the input come from its header */
+  /* 2. the digits of the input come from its header */
   src_actual_prec = numeric_db_value_digits (src_value);
 
   /* 3. fast zero check: if the significant digit count is 1 and the last byte of the buffer is 0, 
@@ -7171,7 +7168,7 @@ numeric_coerce_value_to_num (const DB_VALUE *src, DB_VALUE *dest, DB_DATA_STATUS
       bool src_is_float_numeric = false;
       db_get_numeric_precision_and_scale (src, &precision, &scale, &src_is_float_numeric);
 
-      /* POC: a fixed value converted to a float one takes the digits its header carries */
+      /* a fixed value converted to a float one takes the digits its header carries */
       if (!src_is_float_numeric
 	  && (precision == (unsigned char) DB_HJOIN_NUMERIC_PRECISION_DEFERRED
 	      || desired_precision == DB_DEFAULT_NUMERIC_PRECISION))
@@ -7208,7 +7205,6 @@ numeric_coerce_value_to_num (const DB_VALUE *src, DB_VALUE *dest, DB_DATA_STATUS
       bool dest_value_is_negative = num_is_negative;
       int src_digits = 0, dest_digits = 0;
 
-      /* POC: the intermediate value keeps the digits of its source */
       if constexpr (SRC == DB_TYPE_NUMERIC)
 	{
 	  src_digits = numeric_db_value_digits (src);
@@ -7230,7 +7226,6 @@ numeric_coerce_value_to_num (const DB_VALUE *src, DB_VALUE *dest, DB_DATA_STATUS
 	  goto exit_on_error;
 	}
 
-      /* POC: the result carries the digits the conversion gives */
       db_make_numeric (dest, num, desired_precision, desired_scale, DB_NUMERIC_BUF_SIZE, dest_value_is_negative, dest_digits);
     }
 
@@ -7862,12 +7857,11 @@ numeric_db_value_fixed_to_float_domain (DB_VALUE * value, const DB_DOMAIN * doma
       return;
     }
 
-  /* POC: the coefficient and the header digits stay, and only the domain becomes the float one */
   FIXED_TO_FLOAT_NUMERIC (value);
 }
 
 /*
- * numeric_db_value_digits () - POC: the digits of a NUMERIC value
+ * numeric_db_value_digits () - the digits of a NUMERIC value
  *   return: digit count of the coefficient
  *   value(in): a NUMERIC value that is not NULL
  *
@@ -7879,7 +7873,7 @@ numeric_db_value_digits (const DB_VALUE * value)
   if (value->data.num.header.precision > 0)
     {
 #if !defined (NDEBUG)
-      /* POC: the header digits of a fixed value are the digits of its coefficient, zero has one */
+      /* the header digits of a fixed value are the digits of its coefficient, zero has one */
       const int coefficient_digits = numeric_get_precision_digits ((uint8_t *) db_locate_numeric (value));
       assert (value->domain.numeric_info.precision == DB_DEFAULT_NUMERIC_PRECISION
 	      || value->data.num.header.precision == (coefficient_digits > 0 ? coefficient_digits : 1));

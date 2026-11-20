@@ -13184,8 +13184,8 @@ error:
 
 /*
  * cdc_check_if_schema_changed - compare the representation in record descriptor with latest representation,
- *                               then check if they have different representation ID. POC: a NUMERIC ALTER that
- *                               keeps the rows is not a change (see the function body)
+ *                               then check if they have different representation ID, other than a NUMERIC
+ *                               ALTER that keeps the rows
  *
  * return: TRUE if schema has been changed
  *
@@ -13213,7 +13213,7 @@ cdc_check_if_schema_changed (THREAD_ENTRY * thread_p, const OID * classoid, RECD
       return false;
     }
 
-  /* POC: an ALTER that changes a fixed NUMERIC by its schema only (to float, or to more precision with the same
+  /* an ALTER that changes a fixed NUMERIC by its schema only (to float, or to more precision with the same
    * scale) keeps the rows in the older representation. Such a row has the same attributes, and the heap reads it in
    * the current domain, so it is not a changed schema here */
   old_rep = heap_classrepr_get (thread_p, classoid, NULL, or_rep_id (recdes), &idx_incache);
@@ -13249,7 +13249,6 @@ cdc_check_if_schema_changed (THREAD_ENTRY * thread_p, const OID * classoid, RECD
       else if (old_att->domain != last_att->domain
 	       && !tp_domain_match (old_att->domain, last_att->domain, TP_EXACT_MATCH))
 	{
-	  /* only the NUMERIC changes that keep the rows */
 	  is_changed = !(last_att->type == DB_TYPE_NUMERIC
 			 && old_att->domain->precision != DB_DEFAULT_NUMERIC_PRECISION
 			 && (last_att->domain->precision == DB_DEFAULT_NUMERIC_PRECISION
@@ -13515,7 +13514,7 @@ cdc_make_dml_loginfo (THREAD_ENTRY * thread_p, int trid, char *user, CDC_DML_TYP
 
 	  assert (heap_value->read_attrepr != NULL);
 
-	  /* POC: an older representation has no def_order, and its attributes are the current ones */
+	  /* an older representation has no def_order, and its attributes are the current ones */
 	  oldval_deforder = heap_value->last_attrepr->def_order;
 
 	  /* reading redo_recdes below reuses attr_info and clears each dbvalue, which frees any buffer
@@ -13573,7 +13572,7 @@ cdc_make_dml_loginfo (THREAD_ENTRY * thread_p, int trid, char *user, CDC_DML_TYP
 
 	  assert (heap_value->read_attrepr != NULL);
 
-	  /* POC: an older representation has no def_order, and its attributes are the current ones */
+	  /* an older representation has no def_order, and its attributes are the current ones */
 	  newval_deforder = heap_value->last_attrepr->def_order;
 
 	  memcpy (&new_values[newval_deforder], &heap_value->dbvalue, sizeof (DB_VALUE));

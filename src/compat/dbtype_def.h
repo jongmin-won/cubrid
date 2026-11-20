@@ -629,7 +629,7 @@ extern "C"
 
 /* This constant defines the default scale of DB_TYPE_NUMERIC. */
 #define DB_DEFAULT_NUMERIC_SCALE (0)
-/* POC: the digits argument of db_make_numeric () for a float NUMERIC; a fixed one takes its digits, 1 or more */
+/* the digits argument of db_make_numeric () that makes a float NUMERIC, a fixed one takes its digits (1 or more) */
 #define DB_NUMERIC_FLOAT_DIGITS (0)
 
 /* This constant defines the default scale of result of numeric division operation (CUBRID 11.4 and earlier) */
@@ -1347,8 +1347,8 @@ extern "C"
 #ifdef __cplusplus
 }
 
-/* POC: the last argument of db_make_numeric () is the digits of a fixed value, so a caller that still passes
- * whether the value is float fails to compile instead of making the other kind of value */
+/* the last argument of db_make_numeric () is the digits of a fixed value, so a caller passing a bool fails to
+ * compile instead of making the other kind of value */
 int db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale,
 		     const int byte_size, const bool is_value_negative, const bool digits) = delete;
 #endif				/* __cplusplus */

@@ -11698,7 +11698,7 @@ heap_attrvalue_transform_to_dbvalue (HEAP_ATTRVALUE * value, OR_ATTRIBUTE * attr
 	}
     }
 
-  /* POC: an ALTER that changes a fixed NUMERIC by its schema only (to float, or to more precision with the same
+  /* an ALTER that changes a fixed NUMERIC by its schema only (to float, or to more precision with the same
    * scale) keeps the rows, so a row of an older representation takes the current domain and keeps the digits and
    * scale it was read with. Any other change rewrites the rows, which cast the value as it was read */
   if (attrepr != value->last_attrepr && attrepr->type == DB_TYPE_NUMERIC && value->last_attrepr != NULL
@@ -19434,7 +19434,7 @@ heap_object_upgrade_domain (THREAD_ENTRY * thread_p, HEAP_SCANCACHE * upd_scanca
 
 	      if (dest_prec == DB_DEFAULT_NUMERIC_PRECISION)
 		{
-		  /* POC: a fixed to float ALTER keeps its rows and does not come here. A rewrite that ends in a float
+		  /* a fixed to float ALTER keeps its rows and does not come here. A rewrite that ends in a float
 		   * NUMERIC takes the digits of the value as its precision
 		   */
 		  value->dbvalue.data.num.header.precision =
@@ -19444,7 +19444,7 @@ heap_object_upgrade_domain (THREAD_ENTRY * thread_p, HEAP_SCANCACHE * upd_scanca
 		}
 	      else if (src_scale == dest_scale && src_prec < dest_prec)
 		{
-		  /* POC: an ALTER that only raises the precision keeps its rows and does not come here. A rewrite that
+		  /* an ALTER that only raises the precision keeps its rows and does not come here. A rewrite that
 		   * does the same needs no cast, only the domain changes
 		   */
 		  can_skip_cast = true;

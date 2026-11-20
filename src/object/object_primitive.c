@@ -8396,7 +8396,7 @@ mr_setmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value)
 
 	  assert ((byte_size & NUMERIC_VALUE_SIGN_BIT_MASK) == 0);
 
-	  /* POC: a fixed value stores its digits, not the declared precision */
+	  /* a fixed value stores its digits, not the declared precision */
 	  if (!is_float_numeric)
 	    {
 	      precision = numeric_db_value_digits (value);
@@ -8485,7 +8485,7 @@ mr_getmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy
 	}
       else
 	{
-	  /* POC: the declared type comes from the domain, the digits from the header */
+	  /* the declared type comes from the domain, the digits from the header */
 	  assert (precision <= domain->precision && scale == domain->scale);
 	  error = db_make_numeric (value, num, domain->precision, scale, byte_size, is_value_negative, precision);
 	}
@@ -8665,7 +8665,6 @@ mr_setval_numeric (DB_VALUE * dest, const DB_VALUE * src, bool copy)
 	   * difference between the copy and non-copy operations, this may
 	   * need to change.
 	   */
-	  /* POC: a fixed copy keeps the digits of its source */
 	  error =
 	    db_make_numeric (dest, src_numeric, precision, scale, DB_NUMERIC_BUF_SIZE,
 			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (src),
@@ -8743,7 +8742,7 @@ mr_data_writeval_numeric (OR_BUF * buf, DB_VALUE * value)
 	    }
 	  assert ((disk_size & NUMERIC_VALUE_SIGN_BIT_MASK) == 0);
 
-	  /* POC: a fixed value stores its digits, not the declared precision */
+	  /* a fixed value stores its digits, not the declared precision */
 	  if (!is_float_numeric)
 	    {
 	      precision = numeric_db_value_digits (value);
@@ -8866,7 +8865,7 @@ mr_data_readval_numeric (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int
 	}
       else
 	{
-	  /* POC: the declared type comes from the domain, the digits from the header */
+	  /* the declared type comes from the domain, the digits from the header */
 	  assert (precision <= domain->precision && scale == domain->scale);
 	  rc = db_make_numeric (value, num, domain->precision, scale, size, is_value_negative, precision);
 	}
@@ -8897,7 +8896,7 @@ mr_data_cmpdisk_numeric (void *mem1, void *mem2, TP_DOMAIN * domain, int do_coer
 
   assert (domain != NULL);
 
-  /* POC: the disk header holds the digits and scale of each key, so compare them as float values */
+  /* the disk header holds the digits and scale of each key, so compare them as float values */
   or_init (&buf, (char *) mem1, 0);
   rc = mr_data_readval_numeric (&buf, &value1, &tp_Numeric_domain, -1, 0, NULL, 0);
   if (rc != NO_ERROR)
