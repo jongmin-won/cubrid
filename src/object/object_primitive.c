@@ -8485,9 +8485,11 @@ mr_getmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy
 	}
       else
 	{
-	  /* POC: the declared type comes from the domain, the digits from the header */
-	  assert (precision <= domain->precision && scale == domain->scale);
-	  error = db_make_numeric (value, num, domain->precision, scale, byte_size, is_value_negative, precision);
+	  /* POC: the declared type comes from the domain, the digits from the header. A value read with the domain of
+	   * another column, as a foreign key message does, keeps its own scale and takes its digits as its precision */
+	  error =
+	    db_make_numeric (value, num, (scale == domain->scale) ? domain->precision : precision, scale, byte_size,
+			     is_value_negative, precision);
 	}
       value->need_clear = false;
     }
@@ -8853,9 +8855,11 @@ mr_data_readval_numeric (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int
 	}
       else
 	{
-	  /* POC: the declared type comes from the domain, the digits from the header */
-	  assert (precision <= domain->precision && scale == domain->scale);
-	  rc = db_make_numeric (value, num, domain->precision, scale, size, is_value_negative, precision);
+	  /* POC: the declared type comes from the domain, the digits from the header. A value read with the domain of
+	   * another column, as a foreign key message does, keeps its own scale and takes its digits as its precision */
+	  rc =
+	    db_make_numeric (value, num, (scale == domain->scale) ? domain->precision : precision, scale, size,
+			     is_value_negative, precision);
 	}
 
       value->need_clear = false;
