@@ -197,6 +197,7 @@ struct class_attr_ndv;
 /* provided_ndv (optional): pre-computed per-column NDV (e.g. from the histogram full scan) so the
  * server reuses it and skips its own NDV scan. NULL => server computes NDV itself. */
 extern int sm_update_statistics (MOP classop, bool with_fullscan, struct class_attr_ndv *provided_ndv = NULL);
+extern int sm_update_statistics_without_gathering_stats (MOP classop, bool with_fullscan);
 extern int sm_update_all_statistics (bool with_fullscan, int random_seed, int no_histogram,
 				     MOP * skip_histogram_mops, int n_skip);
 

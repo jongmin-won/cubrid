@@ -935,6 +935,161 @@ btree_init_root_header (THREAD_ENTRY * thread_p, VFID * vfid, PAGE_PTR page_ptr,
 }
 
 /*
+ * btree_key_column_is_widened () - Can the keys stored with old_type be read with new_type
+ *
+ *   return: true if they can
+ *   old_type(in): domain of one key column in the root header
+ *   new_type(in): domain of the same column after ALTER
+ */
+static bool
+btree_key_column_is_widened (TP_DOMAIN * old_type, TP_DOMAIN * new_type)
+{
+  if (TP_DOMAIN_TYPE (old_type) != TP_DOMAIN_TYPE (new_type) || old_type->is_desc != new_type->is_desc)
+    {
+      return false;
+    }
+
+  switch (TP_DOMAIN_TYPE (old_type))
+    {
+    case DB_TYPE_VARCHAR:
+    case DB_TYPE_VARBIT:
+      /* a stored key keeps its own length, so a longer declared length reads it as it is */
+      return (old_type->precision <= new_type->precision && TP_DOMAIN_CODESET (old_type) == TP_DOMAIN_CODESET (new_type)
+	      && TP_DOMAIN_COLLATION (old_type) == TP_DOMAIN_COLLATION (new_type));
+
+    default:
+      return tp_domain_match (old_type, new_type, TP_EXACT_MATCH) != 0;
+    }
+}
+
+/*
+ * btree_key_type_is_widened () - Can the keys stored with old_type be read with new_type
+ *
+ *   return: true if they can
+ *   old_type(in): key domain in the root header
+ *   new_type(in): key domain after ALTER
+ */
+static bool
+btree_key_type_is_widened (TP_DOMAIN * old_type, TP_DOMAIN * new_type)
+{
+  if (TP_DOMAIN_TYPE (old_type) != DB_TYPE_MIDXKEY)
+    {
+      return btree_key_column_is_widened (old_type, new_type);
+    }
+
+  if (TP_DOMAIN_TYPE (new_type) != DB_TYPE_MIDXKEY)
+    {
+      return false;
+    }
+
+  for (old_type = old_type->setdomain, new_type = new_type->setdomain; old_type != NULL && new_type != NULL;
+       old_type = old_type->next, new_type = new_type->next)
+    {
+      if (!btree_key_column_is_widened (old_type, new_type))
+	{
+	  return false;
+	}
+    }
+
+  return (old_type == NULL && new_type == NULL);
+}
+
+/*
+ * xbtree_change_key_type () - Change the key domain in the root header of an index whose column was widened, so the
+ *			       index needs no rebuild
+ *
+ *   return: error code
+ *   btid(in): index
+ *   key_type(in): key domain after ALTER
+ *   is_changed(out): false if the index has to be rebuilt
+ */
+int
+xbtree_change_key_type (THREAD_ENTRY * thread_p, BTID * btid, TP_DOMAIN * key_type, bool * is_changed)
+{
+  VPID root_vpid;
+  PAGE_PTR root_page = NULL;
+  BTREE_ROOT_HEADER *root_header = NULL;
+  TP_DOMAIN *old_key_type = NULL;
+  OR_BUF buf;
+  RECDES old_rec, new_rec;
+  char new_rec_buf[IO_MAX_PAGE_SIZE + BTREE_MAX_ALIGN];
+  int error = NO_ERROR;
+
+  assert (btid != NULL && key_type != NULL && is_changed != NULL);
+
+  *is_changed = false;
+
+  root_vpid.volid = btid->vfid.volid;
+  root_vpid.pageid = btid->root_pageid;
+  root_page = pgbuf_fix (thread_p, &root_vpid, OLD_PAGE, PGBUF_LATCH_WRITE, PGBUF_UNCONDITIONAL_LATCH);
+  if (root_page == NULL)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  if (spage_get_record (thread_p, root_page, HEADER, &old_rec, PEEK) != S_SUCCESS)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      goto end;
+    }
+  root_header = (BTREE_ROOT_HEADER *) old_rec.data;
+
+  or_init (&buf, root_header->packed_key_domain, -1);
+  old_key_type = or_get_domain (&buf, NULL, NULL);
+  if (old_key_type == NULL)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      goto end;
+    }
+
+  if (old_key_type == key_type)
+    {
+      *is_changed = true;
+      goto end;
+    }
+
+  if (!btree_key_type_is_widened (old_key_type, key_type))
+    {
+      goto end;
+    }
+
+  new_rec.area_size = DB_PAGESIZE;
+  new_rec.data = PTR_ALIGN (new_rec_buf, BTREE_MAX_ALIGN);
+  error = btree_pack_root_header (&new_rec, root_header, key_type);
+  if (error != NO_ERROR)
+    {
+      goto end;
+    }
+
+  /* a precision of OR_DOMAIN_PRECISION_MAX or more takes one more word in the packed domain, and the recovery of a
+   * header update (btree_rv_nodehdr_undoredo_update) expects the record to keep its length, so such an index is
+   * rebuilt instead */
+  if (new_rec.length != old_rec.length)
+    {
+      goto end;
+    }
+
+  log_append_undoredo_data2 (thread_p, RVBT_NDHEADER_UPD, &btid->vfid, root_page, HEADER, old_rec.length,
+			     new_rec.length, old_rec.data, new_rec.data);
+
+  if (spage_update (thread_p, root_page, HEADER, &new_rec) != SP_SUCCESS)
+    {
+      assert (false);
+      ASSERT_ERROR_AND_SET (error);
+      goto end;
+    }
+  pgbuf_set_dirty (thread_p, root_page, DONT_FREE);
+
+  *is_changed = true;
+
+end:
+  pgbuf_unfix_and_init (thread_p, root_page);
+
+  return error;
+}
+
+/*
  * btree_init_overflow_header () - insert btree overflow node header
  *
  *   return:

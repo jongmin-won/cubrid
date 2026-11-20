@@ -7403,6 +7403,66 @@ btree_class_test_unique (char *buf, int buf_size)
 }
 
 /*
+ * btree_change_key_type () - Change the key domain in the root header of an index whose column was widened
+ *
+ * return	   : Error code.
+ * btid (in)	   : B-tree identifier.
+ * key_type (in)   : Key domain after ALTER.
+ * is_changed (out) : False if the index has to be rebuilt.
+ */
+int
+btree_change_key_type (BTID * btid, TP_DOMAIN * key_type, bool * is_changed)
+{
+#if defined(CS_MODE)
+  int req_error, status = ER_NET_CLIENT_DATA_RECEIVE;
+  int request_size, changed = 0;
+  char *request, *ptr;
+  OR_ALIGNED_BUF (OR_INT_SIZE * 2) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+
+  *is_changed = false;
+
+  request_size = OR_BTID_ALIGNED_SIZE + or_packed_domain_size (key_type, 0);
+  request = (char *) malloc (request_size);
+  if (request == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) request_size);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  ptr = or_pack_btid (request, btid);
+  ptr = or_pack_domain (ptr, key_type, 0, 0);
+
+  req_error = net_client_request (NET_SERVER_BTREE_CHANGE_KEY_TYPE, request, request_size, reply,
+				  OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  if (!req_error)
+    {
+      ptr = or_unpack_int (reply, &status);
+      ptr = or_unpack_int (ptr, &changed);
+      *is_changed = (status == NO_ERROR && changed != 0);
+    }
+  else
+    {
+      status = req_error;
+    }
+
+  free_and_init (request);
+
+  return status;
+#else /* CS_MODE */
+  int error;
+
+  THREAD_ENTRY *thread_p = enter_server ();
+
+  error = xbtree_change_key_type (thread_p, btid, key_type, is_changed);
+
+  exit_server (*thread_p);
+
+  return error;
+#endif /* !CS_MODE */
+}
+
+/*
  * btree_compact_overflow () - CBRD-27401: ALTER INDEX ... COMPACT. Compacts the overflow OID chains of an index on
  *			       the server.
  *
