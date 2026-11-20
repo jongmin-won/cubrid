@@ -11698,6 +11698,26 @@ heap_attrvalue_transform_to_dbvalue (HEAP_ATTRVALUE * value, OR_ATTRIBUTE * attr
 	}
     }
 
+  /* POC: an ALTER that changes a fixed NUMERIC by its schema only (to float, or to more precision with the same
+   * scale) keeps the rows, so a row of an older representation takes the current domain and keeps the digits and
+   * scale it was read with. Any other change rewrites the rows, which cast the value as it was read */
+  if (attrepr != value->last_attrepr && attrepr->type == DB_TYPE_NUMERIC && value->last_attrepr != NULL
+      && value->last_attrepr->type == DB_TYPE_NUMERIC && !DB_IS_NULL (&value->dbvalue)
+      && value->dbvalue.domain.numeric_info.precision != DB_DEFAULT_NUMERIC_PRECISION)
+    {
+      const TP_DOMAIN *last_domain = value->last_attrepr->domain;
+
+      if (last_domain->precision == DB_DEFAULT_NUMERIC_PRECISION)
+	{
+	  FIXED_TO_FLOAT_NUMERIC (&value->dbvalue);
+	}
+      else if (last_domain->scale == value->dbvalue.domain.numeric_info.scale
+	       && last_domain->precision > value->dbvalue.domain.numeric_info.precision)
+	{
+	  value->dbvalue.domain.numeric_info.precision = last_domain->precision;
+	}
+    }
+
   return NO_ERROR;
 }
 

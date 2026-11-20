@@ -11025,7 +11025,9 @@ do_alter_clause_change_attribute (PARSER_CONTEXT * const parser, PT_NODE * const
 	}
     }
 
-  if (is_srv_update_needed || is_att_prop_set (attr_chg_prop.p[P_TYPE], ATT_CHG_TYPE_PREC_INCR))
+  /* POC: the indexes of a NUMERIC changed by its schema only are made again for the new key domain */
+  if (is_srv_update_needed || is_att_prop_set (attr_chg_prop.p[P_TYPE], ATT_CHG_TYPE_PREC_INCR)
+      || is_att_prop_set (attr_chg_prop.p[P_TYPE], ATT_CHG_TYPE_NUMERIC_PREC_INCR))
     {
       error = do_drop_att_constraints (class_mop, attr_chg_prop.constr_info);
       if (error != NO_ERROR)
