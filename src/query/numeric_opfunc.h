@@ -121,8 +121,7 @@ typedef enum
 #define db_locate_numeric(value) ((DB_C_NUMERIC) ((value)->data.num.d.buf))
 
 #define NUMERIC_VALUE_SIGN_BIT_MASK 0x80
-#define NUMERIC_HEADER_SCALE_SIGN_BIT_MASK 0x40
-#define NUMERIC_HEADER_PRECISION_MASK 0x3F
+#define NUMERIC_HEADER_SCALE_SIGN_BIT_MASK 0x80
 
 /* POC: a fixed value keeps the digits of its header, and takes the declared precision when it has none */
 #define FIXED_TO_FLOAT_NUMERIC(value) \
@@ -292,67 +291,70 @@ extern int numeric_sum_acc_snapshot (const SUM_ACC * acc, DB_VALUE * result);
 
 /*
  * NUMERIC_HEADER_SIZE
- * The numeric header is 2 bytes in size.  Shared by every reader of the disk bytes, which reads it through
- * numeric_disk_* () below.  POC: a fixed value stores its digits as a float one does, so the size follows from the
- * precision and is not stored.
- * - header[0]: Bit 7 (0x80): Value sign bit (1 = negative, 0 = positive).
- *              Bit 6 (0x40): Scale sign bit (1 = negative scale, 0 = positive scale).
- *              Bits 0-5: Precision, the digits of the value (1 ~ 40).
- * - header[1]: Scale absolute value (positive scale 0 ~ 252, negative scale stored as its absolute value).
- * The total size (header + magnitude) is numeric_repr_disk_size_by_precision () of the precision.
+ * The numeric header is 3 bytes in size.  Shared by every reader of the disk bytes (mr_data_readval_numeric () in
+ * object_primitive.c, numeric_repr_read_disk ()), which must agree on where the digits start.
+ * - header[0]: Total byte size of the numeric data (header + data).
+ *              Bit 7 (0x80): Data sign bit (1 = negative, 0 = positive).
+ *              Bits 0-6: Total byte size value (4 ~ 20 bytes).
+ *                        Minimum: precision 1 -> data 1 byte + header 3 = 4 bytes (aligned to 4).
+ *                        Maximum: precision 40 -> data 17 bytes + header 3 = 20 bytes (aligned to 20).
+ * - header[1]: Precision and scale sign bit.
+ *              Bit 7 (0x80): Scale sign bit (1 = negative scale, 0 = positive scale).
+ *              Bits 0-6: Precision value (1 ~ 40).
+ * - header[2]: Scale value.
+ *              Bits 0-7: Scale absolute value (0 ~ 214).
+ *                        Positive scale: 0 ~ 252.
+ *                        Negative scale: -214 to -1 (stored as absolute value, sign in header[1] bit 7).
  */
-#define NUMERIC_HEADER_SIZE (2)
+#define NUMERIC_HEADER_SIZE (3)
 
 /* how the digits of a NUMERIC value are laid out in its DB_VALUE buffer (DB_NUMERIC::d.buf) and on disk; outside
  * numeric_opfunc.c, code that reads or writes those bytes goes through numeric_repr_*. The magnitude is one
  * big-endian binary integer of DB_NUMERIC_BUF_SIZE bytes; the disk keeps its low bytes, the header plus the digits
  * padded to a multiple of 4. Plain C: dbtype_function.c is compiled as C. */
 
-/* disk size (header included) of a NUMERIC by its precision, its digits: the header and the magnitude bytes of
- * 10^precision - 1, padded to a multiple of 4 */
+/* disk size (header included) of a float NUMERIC by its precision */
 static inline int
 numeric_repr_disk_size_by_precision (int precision)
 {
   static const int size_by_precision[DB_MAX_NUMERIC_PRECISION + 1] = {
-    0, 4, 4, 4, 4, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 12, 12, 12, 12, 12,
-    12, 12, 12, 12, 12, 16, 16, 16, 16, 16, 16, 16, 16, 16, 20, 20, 20, 20, 20, 20,
+    0, 4, 4, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 12, 12, 12, 12, 12, 12, 12,
+    12, 12, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 20, 20, 20, 20, 20, 20, 20, 20,
     20
   };
 
   return size_by_precision[precision];
 }
 
-/* the precision, the scale and the sign the disk header of a NUMERIC holds, and its total size */
+/* disk size (header included) of a fixed NUMERIC by its value: a fixed precision is at most 38, so the magnitude
+ * fits in the low 16 bytes */
 static inline int
-numeric_disk_precision (const unsigned char *disk)
+numeric_repr_disk_size_by_value (const unsigned char *buf)
 {
-  return disk[0] & NUMERIC_HEADER_PRECISION_MASK;
-}
+  static const int size_by_bytes[17] = {
+    0, 4, 8, 8, 8, 8, 12, 12, 12, 12, 16, 16, 16, 16, 20, 20, 20
+  };
+  uint64_t word_buf[2];
 
-static inline int
-numeric_disk_scale (const unsigned char *disk)
-{
-  return (disk[0] & NUMERIC_HEADER_SCALE_SIGN_BIT_MASK) ? -((int) disk[1]) : (int) disk[1];
-}
-
-static inline bool
-numeric_disk_is_negative (const unsigned char *disk)
-{
-  return (disk[0] & NUMERIC_VALUE_SIGN_BIT_MASK) != 0;
-}
-
-static inline int
-numeric_disk_size (const unsigned char *disk)
-{
-  return numeric_repr_disk_size_by_precision (numeric_disk_precision (disk));
-}
-
-static inline void
-numeric_disk_write_header (unsigned char *disk, int precision, int scale, bool is_negative)
-{
-  disk[0] = (unsigned char) (precision | (scale < 0 ? NUMERIC_HEADER_SCALE_SIGN_BIT_MASK : 0)
-			     | (is_negative ? NUMERIC_VALUE_SIGN_BIT_MASK : 0));
-  disk[1] = (unsigned char) (scale < 0 ? -scale : scale);
+  /* the bytes stay big-endian: on a little-endian host the leading zero bytes are the trailing zero bits */
+  memcpy (word_buf, buf + 1, sizeof (word_buf));
+  if (word_buf[0] != 0)
+    {
+#if OR_BYTE_ORDER == OR_LITTLE_ENDIAN
+      return size_by_bytes[16 - (__builtin_ctzll (word_buf[0]) >> 3)];
+#else
+      return size_by_bytes[16 - (__builtin_clzll (word_buf[0]) >> 3)];
+#endif
+    }
+  if (word_buf[1] != 0)
+    {
+#if OR_BYTE_ORDER == OR_LITTLE_ENDIAN
+      return size_by_bytes[8 - (__builtin_ctzll (word_buf[1]) >> 3)];
+#else
+      return size_by_bytes[8 - (__builtin_clzll (word_buf[1]) >> 3)];
+#endif
+    }
+  return size_by_bytes[1];	/* zero */
 }
 
 /* the buffer from the digits of a disk value of disk_size bytes, or from a whole buffer (DB_NUMERIC_BUF_SIZE); 0 for
@@ -364,26 +366,23 @@ numeric_repr_read_disk (unsigned char *buf, const unsigned char *digits, int dis
   switch (disk_size)
     {
     case 4:
-      memset (buf, 0, 15);
-      memcpy (buf + 15, digits, 2);
+      memset (buf, 0, 16);
+      memcpy (buf + 16, digits, 1);
       return 1;
     case 8:
-      memset (buf, 0, 11);
-      memcpy (buf + 11, digits, 6);
+      memset (buf, 0, 12);
+      memcpy (buf + 12, digits, 5);
       return 1;
     case 12:
-      memset (buf, 0, 7);
-      memcpy (buf + 7, digits, 10);
+      memset (buf, 0, 8);
+      memcpy (buf + 8, digits, 9);
       return 1;
     case 16:
-      memset (buf, 0, 3);
-      memcpy (buf + 3, digits, 14);
-      return 1;
-    case 20:
-      /* the 18 bytes of a 20 byte value lead with a zero byte the buffer does not keep */
-      memcpy (buf, digits + 1, DB_NUMERIC_BUF_SIZE);
+      memset (buf, 0, 4);
+      memcpy (buf + 4, digits, 13);
       return 1;
     case DB_NUMERIC_BUF_SIZE:
+    case 20:
       memcpy (buf, digits, DB_NUMERIC_BUF_SIZE);
       return 1;
     default:
@@ -397,13 +396,6 @@ numeric_repr_write_disk (unsigned char *digits, const unsigned char *buf, int di
 {
   const int digits_size = disk_size - NUMERIC_HEADER_SIZE;
 
-  if (digits_size > DB_NUMERIC_BUF_SIZE)
-    {
-      /* a 20 byte value: a zero byte ahead of the whole buffer */
-      digits[0] = 0;
-      memcpy (digits + 1, buf, DB_NUMERIC_BUF_SIZE);
-      return;
-    }
   memcpy (digits, buf + DB_NUMERIC_BUF_SIZE - digits_size, digits_size);
 }
 

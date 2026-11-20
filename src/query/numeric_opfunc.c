@@ -4643,25 +4643,30 @@ bool
 numeric_agg_expr_from_disk (const unsigned char *disk, int avail, NUMERIC_AGG_EXPR_VAL * out)
 {
   int size, nbytes, i, scale;
-  bool is_negative;
+  bool is_negative, is_negative_scale;
   uint128_t coefficient = 0;
 
   if (disk == NULL || (avail >= 0 && avail < NUMERIC_HEADER_SIZE))
     {
       return false;
     }
-  size = numeric_disk_size (disk);
+  size = (disk[0] & 0x7F);
   if (size < NUMERIC_HEADER_SIZE || (avail >= 0 && size > avail))
     {
       return false;
     }
   nbytes = size - NUMERIC_HEADER_SIZE;
-  is_negative = numeric_disk_is_negative (disk);
-  scale = numeric_disk_scale (disk);
+  if (nbytes > DB_NUMERIC_BUF_SIZE)
+    {
+      return false;
+    }
+  is_negative = (disk[0] & NUMERIC_VALUE_SIGN_BIT_MASK) != 0;
+  is_negative_scale = (disk[1] & NUMERIC_HEADER_SCALE_SIGN_BIT_MASK) != 0;
+  scale = is_negative_scale ? -((int) disk[2]) : (int) disk[2];
 
-  /* the magnitude is big-endian; a payload over 16 bytes whose leading bytes are set exceeds uint128 */
+  /* the magnitude is big-endian; a 17-byte payload whose top byte is set exceeds uint128 */
   disk += NUMERIC_HEADER_SIZE;
-  while (nbytes > (int) sizeof (uint128_t))
+  if (nbytes == DB_NUMERIC_BUF_SIZE)
     {
       if (disk[0] != 0)
 	{

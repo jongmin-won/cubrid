@@ -428,14 +428,30 @@ resolve_string_collation (const TP_DOMAIN *key_domain, bool *space_as_zero, bool
 static int
 fixed_numeric_magnitude_bytes (int precision)
 {
-  /* the magnitude the writer stores for 10^p - 1, the widest value of p digits: the disk size by the precision less
-   * the header, and a 20 byte value's leading zero byte is not part of the buffer */
+  /* by precision p: the magnitude the writer stores for 10^p - 1, the widest value of p digits. The value takes
+   * bytes (p) bytes, and the writer keeps leading zero bytes ahead of them until the image, the 3 byte header and
+   * the magnitude, is a multiple of 4 bytes.
+   *
+   *   bytes (p)     = ceil (p * log256 (10)), where log256 (10) = 0.415...
+   *   magnitude (p) = DB_ALIGN (NUMERIC_HEADER_SIZE + bytes (p), 4) - NUMERIC_HEADER_SIZE
+   *
+   *   p          1-2   3-12   13-21   22-31   32-38
+   *   bytes      1     2-5    6-9     10-13   14-16
+   *   image      4     8      12      16      20
+   *   magnitude  1     5      9       13      17
+   */
+  static const UINT8 MAGNITUDE_BYTES[DB_MAX_FIXED_NUMERIC_PRECISION + 1] =
+  {
+    0, 1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 9, 9, 9, 9, 9, 9, 9,
+    9, 9, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 17, 17, 17, 17, 17, 17, 17
+  };
+
   if (precision < 1 || precision > DB_MAX_FIXED_NUMERIC_PRECISION)
     {
       return 0;
     }
 
-  return std::min (numeric_repr_disk_size_by_precision (precision) - NUMERIC_HEADER_SIZE, DB_NUMERIC_BUF_SIZE);
+  return MAGNITUDE_BYTES[precision];
 }
 
 /*
@@ -902,15 +918,9 @@ byte_string_of (const RADIX_KEY_ENCODING *encoding, const unsigned char *key)
     case RADIX_KEY_FIXED_NUMERIC:
     case RADIX_KEY_FLOAT_NUMERIC:
       value.bytes = key + NUMERIC_HEADER_SIZE;
-      value.length = numeric_disk_size (key) - NUMERIC_HEADER_SIZE;
-      if (value.length > DB_NUMERIC_BUF_SIZE)
-	{
-	  /* a 20 byte value leads with a zero byte the buffer does not keep */
-	  value.bytes += value.length - DB_NUMERIC_BUF_SIZE;
-	  value.length = DB_NUMERIC_BUF_SIZE;
-	}
-      value.negative = numeric_disk_is_negative (key);
-      value.scale = numeric_disk_scale (key);
+      value.length = (key[0] & ~NUMERIC_VALUE_SIGN_BIT_MASK) - NUMERIC_HEADER_SIZE;
+      value.negative = (key[0] & NUMERIC_VALUE_SIGN_BIT_MASK) != 0;
+      value.scale = (key[1] & NUMERIC_HEADER_SCALE_SIGN_BIT_MASK) ? -key[2] : key[2];
       break;
 
     default:
@@ -1962,9 +1972,9 @@ msd_sort<WORD_WIDTH>::float_numeric_less (BTSORT_RUN_SLOT left, BTSORT_RUN_SLOT 
   const unsigned char *left_bytes = (const unsigned char *) BTSORT_REC_KEY (m_rec_base + left);
   const unsigned char *right_bytes = (const unsigned char *) BTSORT_REC_KEY (m_rec_base + right);
 
-  /* the same stored bytes, the precision with the signs, the scale and the magnitude, make the same radix key */
+  /* the same stored bytes, the length with the sign, the scale and the magnitude, make the same radix key */
   if (left_bytes[0] == right_bytes[0]
-      && memcmp (left_bytes, right_bytes, (size_t) numeric_disk_size (left_bytes)) == 0)
+      && memcmp (left_bytes, right_bytes, (size_t) (left_bytes[0] & ~NUMERIC_VALUE_SIGN_BIT_MASK)) == 0)
     {
       return oid_less (m_rec_base, left, right);
     }
