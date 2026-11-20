@@ -496,8 +496,10 @@ db_value_domain_min (DB_VALUE * value, const DB_TYPE type,
 	     * this function only needs to consider the maximum integer magnitude case
 	     * by setting the scale to its minimum value.
 	     */
-	    value->domain.numeric_info.scale = DB_MIN_NUMERIC_SCALE;
-	    FIXED_TO_FLOAT_NUMERIC (value);
+	    /* POC: the value is float already, so its header takes the digits and the scale */
+	    value->data.num.header.precision = DB_MAX_NUMERIC_PRECISION;
+	    value->data.num.header.scale = DB_MIN_NUMERIC_SCALE;
+	    value->domain.numeric_info.scale = DB_DEFAULT_NUMERIC_SCALE;
 	  }
 	else
 	  {
@@ -685,8 +687,10 @@ db_value_domain_max (DB_VALUE * value, const DB_TYPE type,
 	     * this function only needs to consider the maximum integer magnitude case
 	     * by setting the scale to its minimum value.
 	     */
-	    value->domain.numeric_info.scale = DB_MIN_NUMERIC_SCALE;
-	    FIXED_TO_FLOAT_NUMERIC (value);
+	    /* POC: the value is float already, so its header takes the digits and the scale */
+	    value->data.num.header.precision = DB_MAX_NUMERIC_PRECISION;
+	    value->data.num.header.scale = DB_MIN_NUMERIC_SCALE;
+	    value->domain.numeric_info.scale = DB_DEFAULT_NUMERIC_SCALE;
 	  }
 	else
 	  {

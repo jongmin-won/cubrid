@@ -7863,7 +7863,6 @@ numeric_db_value_fixed_to_float_domain (DB_VALUE * value, const DB_DOMAIN * doma
     }
 
   /* POC: the coefficient and the header digits stay, and only the domain becomes the float one */
-  value->data.num.header.precision = numeric_db_value_digits (value);
   FIXED_TO_FLOAT_NUMERIC (value);
 }
 
