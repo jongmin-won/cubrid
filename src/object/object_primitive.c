@@ -8463,6 +8463,7 @@ mr_getmem_numeric (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy
       else
 	{
 	  /* POC: the declared type comes from the domain, the digits from the header */
+	  assert (precision <= domain->precision && scale == domain->scale);
 	  error = db_make_numeric (value, num, domain->precision, scale, byte_size, is_value_negative, precision);
 	}
       value->need_clear = false;
@@ -8807,6 +8808,7 @@ mr_data_readval_numeric (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int
       else
 	{
 	  /* POC: the declared type comes from the domain, the digits from the header */
+	  assert (precision <= domain->precision && scale == domain->scale);
 	  rc = db_make_numeric (value, num, domain->precision, scale, size, is_value_negative, precision);
 	}
 
@@ -8836,15 +8838,16 @@ mr_data_cmpdisk_numeric (void *mem1, void *mem2, TP_DOMAIN * domain, int do_coer
 
   assert (domain != NULL);
 
+  /* POC: the disk header holds the digits and scale of each key, so compare them as float values */
   or_init (&buf, (char *) mem1, 0);
-  rc = mr_data_readval_numeric (&buf, &value1, domain, -1, 0, NULL, 0);
+  rc = mr_data_readval_numeric (&buf, &value1, &tp_Numeric_domain, -1, 0, NULL, 0);
   if (rc != NO_ERROR)
     {
       return DB_UNK;
     }
 
   or_init (&buf, (char *) mem2, 0);
-  rc = mr_data_readval_numeric (&buf, &value2, domain, -1, 0, NULL, 0);
+  rc = mr_data_readval_numeric (&buf, &value2, &tp_Numeric_domain, -1, 0, NULL, 0);
   if (rc != NO_ERROR)
     {
       return DB_UNK;
