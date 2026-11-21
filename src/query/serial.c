@@ -964,7 +964,7 @@ serial_bigint_to_value (DB_BIGINT v, DB_VALUE * result)
 
   numeric_coerce_bigint_to_num (v, num, &negative);
   db_make_numeric (result, num, DB_MAX_FIXED_NUMERIC_PRECISION, 0, DB_NUMERIC_BUF_SIZE, negative,
-		   numeric_get_precision_digits ((uint8_t *) num));
+		   numeric_get_precision_digits ((uint8_t *) num), false);
 }
 
 /*
@@ -1699,7 +1699,7 @@ serial_get_nth_value_internal (DB_VALUE * inc_val, DB_VALUE * cur_val, DB_VALUE 
     {
       numeric_coerce_int_to_num (nth, num, NULL);
       db_make_numeric (&tmp_val, num, DB_MAX_FIXED_NUMERIC_PRECISION, 0, DB_NUMERIC_BUF_SIZE, false,
-		       numeric_get_precision_digits ((uint8_t *) num));
+		       numeric_get_precision_digits ((uint8_t *) num), false);
       numeric_db_value_mul (inc_val, &tmp_val, &add_val);
     }
   else

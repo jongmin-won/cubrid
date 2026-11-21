@@ -125,7 +125,9 @@ typedef enum
 
 #define FIXED_TO_FLOAT_NUMERIC(value) \
   do { \
-    (value)->data.num.header.precision = numeric_db_value_digits (value); \
+    int fixed_digits = 0; \
+    (void) db_get_numeric_precision ((value), &fixed_digits, NULL); \
+    (value)->data.num.header.precision = fixed_digits; \
     (value)->data.num.header.scale = (value)->domain.numeric_info.scale; \
     (value)->domain.numeric_info.precision = DB_DEFAULT_NUMERIC_PRECISION; \
     (value)->domain.numeric_info.scale = 0; \
@@ -202,7 +204,6 @@ extern char *numeric_db_value_print (const DB_VALUE * val, char *buf);
 /* Floating-Point NUMERIC */
 extern int numeric_get_precision_digits (uint8_t * calc_buf);
 extern void numeric_db_value_fixed_to_float_domain (DB_VALUE * value, const DB_DOMAIN * domain);
-extern int numeric_db_value_digits (const DB_VALUE * value);
 extern int float_numeric_db_value_add (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * answer);
 extern int float_numeric_db_value_sub (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * answer);
 extern int float_numeric_db_value_mul (const DB_VALUE * dbv1, const DB_VALUE * dbv2, DB_VALUE * answer);
@@ -308,7 +309,7 @@ extern int numeric_sum_acc_snapshot (const SUM_ACC * acc, DB_VALUE * result);
  * big-endian binary integer of DB_NUMERIC_BUF_SIZE bytes; the disk keeps its low bytes, the header plus the digits
  * padded to a multiple of 4. Plain C: dbtype_function.c is compiled as C. */
 
-/* disk size (header included) of a float NUMERIC by its precision */
+/* disk size (header included) of a NUMERIC by its digits */
 static inline int
 numeric_repr_disk_size_by_precision (int precision)
 {
@@ -319,37 +320,6 @@ numeric_repr_disk_size_by_precision (int precision)
   };
 
   return size_by_precision[precision];
-}
-
-/* disk size (header included) of a fixed NUMERIC by its value: a fixed precision is at most 38, so the magnitude
- * fits in the low 16 bytes */
-static inline int
-numeric_repr_disk_size_by_value (const unsigned char *buf)
-{
-  static const int size_by_bytes[17] = {
-    0, 4, 8, 8, 8, 8, 12, 12, 12, 12, 16, 16, 16, 16, 20, 20, 20
-  };
-  uint64_t word_buf[2];
-
-  /* the bytes stay big-endian: on a little-endian host the leading zero bytes are the trailing zero bits */
-  memcpy (word_buf, buf + 1, sizeof (word_buf));
-  if (word_buf[0] != 0)
-    {
-#if OR_BYTE_ORDER == OR_LITTLE_ENDIAN
-      return size_by_bytes[16 - (__builtin_ctzll (word_buf[0]) >> 3)];
-#else
-      return size_by_bytes[16 - (__builtin_clzll (word_buf[0]) >> 3)];
-#endif
-    }
-  if (word_buf[1] != 0)
-    {
-#if OR_BYTE_ORDER == OR_LITTLE_ENDIAN
-      return size_by_bytes[8 - (__builtin_ctzll (word_buf[1]) >> 3)];
-#else
-      return size_by_bytes[8 - (__builtin_clzll (word_buf[1]) >> 3)];
-#endif
-    }
-  return size_by_bytes[1];	/* zero */
 }
 
 /* the buffer from the digits of a disk value of disk_size bytes, or from a whole buffer (DB_NUMERIC_BUF_SIZE); 0 for

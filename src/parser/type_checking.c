@@ -13771,9 +13771,9 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 
 	case DB_TYPE_NUMERIC:
 	  {
+	    int precision = 0, scale = 0, digits = 0;
 	    bool is_float_numeric = false;
-	    int precision = 0, scale = 0;
-	    db_get_numeric_precision_and_scale (arg1, &precision, &scale, &is_float_numeric);
+	    db_get_numeric_precision_and_scale (arg1, &precision, &scale, &digits, &is_float_numeric);
 
 	    bool is_value_negative = !arg1->domain.numeric_info.is_value_negative;
 	    if (is_value_negative && numeric_db_value_is_zero (arg1))
@@ -13783,7 +13783,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	      }
 
 	    db_make_numeric (result, db_get_numeric (arg1), precision, scale, DB_NUMERIC_BUF_SIZE, is_value_negative,
-			     is_float_numeric ? DB_NUMERIC_FLOAT_DIGITS : numeric_db_value_digits (arg1));
+			     digits, is_float_numeric);
 	  }
 	  break;
 

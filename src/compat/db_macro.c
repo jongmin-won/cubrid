@@ -1849,7 +1849,7 @@ coerce_char_to_dbvalue (DB_VALUE * value, char *buf, const int buflen)
 
 	bool is_float_numeric = false;
 	int precision = 0, scale = 0;
-	db_get_numeric_precision_and_scale (value, &precision, &scale, &is_float_numeric);
+	db_get_numeric_precision_and_scale (value, &precision, &scale, NULL, &is_float_numeric);
 
 	error = numeric_coerce_string_to_num (buf, buflen, LANG_SYS_CODESET, &tmp_value);
 	if (error != NO_ERROR)
@@ -1870,7 +1870,8 @@ coerce_char_to_dbvalue (DB_VALUE * value, char *buf, const int buflen)
 	  {
 	    db_make_numeric (value, db_locate_numeric (&tmp_value), DB_VALUE_NUMERIC_HEADER_PRECISION (&tmp_value),
 			     DB_VALUE_NUMERIC_HEADER_SCALE (&tmp_value), DB_NUMERIC_BUF_SIZE,
-			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (&tmp_value), DB_NUMERIC_FLOAT_DIGITS);
+			     DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (&tmp_value),
+			     DB_VALUE_NUMERIC_HEADER_PRECISION (&tmp_value), true);
 	  }
 	else
 	  {
@@ -1890,7 +1891,7 @@ coerce_char_to_dbvalue (DB_VALUE * value, char *buf, const int buflen)
 		/* Yes, I know that the precision and scale are already set, but this is neater than just assigning the
 		 * value. */
 		db_make_numeric (value, new_num, precision, scale, DB_NUMERIC_BUF_SIZE, tmp_value_is_negative,
-				 new_digits);
+				 new_digits, false);
 	      }
 	  }
 	db_value_clear (&tmp_value);
