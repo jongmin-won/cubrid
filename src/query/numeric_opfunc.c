@@ -5625,6 +5625,23 @@ numeric_internal_decimal_to_num (uint64_t significand, int exponent, int max_dig
 	}
     }
 
+  if (*scale > DB_MAX_NUMERIC_SCALE)
+    {
+      /* the digits below the smallest unit of a NUMERIC are rounded off, as a string's are */
+      const int drop = *scale - DB_MAX_NUMERIC_SCALE;
+      const uint64_t unit = _gv_mul_normalize_pow10_lookup[drop - 1];
+
+      assert (drop < ndigits);
+      words[2] = (words[2] + unit / 2) / unit;
+      ndigits -= drop;
+      if (words[2] >= _gv_mul_normalize_pow10_lookup[ndigits - 1])
+	{
+	  ndigits++;
+	}
+      *prec = ndigits;
+      *scale = DB_MAX_NUMERIC_SCALE;
+    }
+
   if (*scale < dst_scale && *prec < DB_MAX_NUMERIC_PRECISION)
     {
       const int pad = MIN (dst_scale - *scale, DB_MAX_NUMERIC_PRECISION - *prec);
@@ -5665,9 +5682,6 @@ int
 numeric_internal_real_to_num (double adouble, int dst_scale, DB_C_NUMERIC num, int *prec, int *scale, bool is_float,
 			      bool * is_value_negative)
 {
-  char numeric_str[MAX (TP_DOUBLE_AS_CHAR_LENGTH + 1, NUMERIC_MAX_STRING_SIZE)];
-  int i = 0;
-
   assert (is_value_negative);
 
   switch (get_fp_value_type (adouble))
@@ -5678,16 +5692,11 @@ numeric_internal_real_to_num (double adouble, int dst_scale, DB_C_NUMERIC num, i
        * does */
       return ER_IT_DATA_OVERFLOW;
     case FP_VALUE_TYPE_ZERO:
+      /* a zero has one digit at any scale */
+      numeric_zero (num, DB_NUMERIC_BUF_SIZE);
+      *is_value_negative = false;
+      *prec = 1;
       *scale = dst_scale;
-      *prec = dst_scale ? dst_scale : 1;
-
-      while (i < *prec)
-	{
-	  numeric_str[i++] = '0';
-	}
-      numeric_str[i] = '\0';
-
-      numeric_coerce_dec_str_to_num (numeric_str, num, is_value_negative);
       return NO_ERROR;
     default:
       /* compare against pow(10, DB_MAX_NUMERIC_PRECISION) to check for overflow/underflow before actual conversion */
@@ -5701,16 +5710,10 @@ numeric_internal_real_to_num (double adouble, int dst_scale, DB_C_NUMERIC num, i
 	    {
 	      /* the floating-point number underflows any possible CUBRID NUMERIC domain type, so just return 0 with no
 	       * other conversion */
+	      numeric_zero (num, DB_NUMERIC_BUF_SIZE);
+	      *is_value_negative = false;
+	      *prec = 1;
 	      *scale = dst_scale;
-	      *prec = dst_scale ? dst_scale : 1;
-
-	      while (i < *prec)
-		{
-		  numeric_str[i++] = '0';
-		}
-	      numeric_str[i] = '\0';
-
-	      numeric_coerce_dec_str_to_num ("0", num, is_value_negative);
 	      return NO_ERROR;
 	    }
 	  else
