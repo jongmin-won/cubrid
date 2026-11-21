@@ -1344,6 +1344,11 @@ extern "C"
 
 #ifdef __cplusplus
 }
-#endif				/* __cplusplus */
 
-#endif				/* _DBTYPE_DEF_H_ */
+/* db_make_numeric () takes the digits then the float flag, so a caller passing them the other way fails to compile */
+int db_make_numeric (DB_VALUE * value, const DB_C_NUMERIC num, const int precision, const int scale,
+		     const int byte_size, const bool is_value_negative, const bool digits,
+		     const int is_float_numeric) = delete;
+#endif /* __cplusplus */
+
+#endif /* _DBTYPE_DEF_H_ */
