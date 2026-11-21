@@ -7175,7 +7175,6 @@ numeric_coerce_value_to_num (const DB_VALUE *src, DB_VALUE *dest, DB_DATA_STATUS
       scale = 0;
     }
   else if constexpr (SRC == DB_TYPE_NUMERIC)
-      desired_precision = MAX (desired_precision, precision);
     {
       bool src_is_float_numeric = false;
       int digits = 0;
