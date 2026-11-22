@@ -24622,6 +24622,11 @@ pt_update_host_var_data_type (PARSER_CONTEXT * parser, PT_NODE * hv_node)
     {
       parser_free_node (parser, hv_node->data_type);
       hv_node->data_type = pt_domain_to_data_type (parser, dom);
+      if (TP_IS_SET_TYPE (TP_DOMAIN_TYPE (dom)))
+	{
+	  /* a collection data type lists only its elements, the collection type is the node's */
+	  hv_node->type_enum = pt_db_to_type_enum (TP_DOMAIN_TYPE (dom));
+	}
     }
 }
 
