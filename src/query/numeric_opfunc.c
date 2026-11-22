@@ -5699,7 +5699,7 @@ numeric_internal_real_to_num (double adouble, int dst_scale, DB_C_NUMERIC num, i
       *scale = dst_scale;
       return NO_ERROR;
     default:
-      /* compare against pow(10, DB_MAX_NUMERIC_PRECISION) to check for overflow/underflow before actual conversion */
+      /* check for overflow and underflow against the limits of any NUMERIC domain before the conversion */
       if (NUMERIC_ABS (adouble) > DB_NUMERIC_OVERFLOW_LIMIT)
 	{
 	  return ER_IT_DATA_OVERFLOW;
