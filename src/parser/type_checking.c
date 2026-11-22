@@ -8259,6 +8259,10 @@ pt_eval_type (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_
 		      d = tp_domain_cache (d);
 		      SET_EXPECTED_DOMAIN (v, d);
 		      pt_preset_hostvar (parser, v);
+		      if (pt_coerce_auto_param_as_literal (parser, v, attr->type_enum, attr->data_type) != NO_ERROR)
+			{
+			  return node;
+			}
 		    }
 		}
 	    }
